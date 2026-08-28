@@ -30,6 +30,15 @@ clusters are picked up automatically on the next run.
 
 ## Install
 
+Just want the script, no repo clutter? Download the single file, pinned to a release tag:
+
+```sh
+curl -O https://raw.githubusercontent.com/glueck-it/pg-clusterbackup/v1.2.0/php/pg_clusterbackup.php
+chmod +x pg_clusterbackup.php
+```
+
+Or clone the full repo (includes examples, SPEC.md, CHANGELOG.md):
+
 ```sh
 git clone https://github.com/glueck-it/pg-clusterbackup.git
 cd pg-clusterbackup/php
