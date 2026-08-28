@@ -1,7 +1,7 @@
 #!/usr/bin/php
 <?php
 /**
- * v2
+ * pg_clusterbackup 1.2.0
  * A class which backups all PostgreSQL clusters with all databases in separate files
  * Don't edit the source, create a ini-file
  *
@@ -12,7 +12,8 @@
  * edit/modify the file pg_clusterbackup.ini for your behaviour or set values with -xy=123 and --ini-write to persist it
  * add to cron with or without any parameters (if you edit the .ini)
  *
- * v2 changes:
+ * Changelog:
+ * 1.2.0
  * - fixed load_ini() referencing an undefined $conf variable (fatal TypeError after first --ini-write)
  * - fixed getopt() to actually parse -D/-T/-L/-F/-h/-d/-n/--email (previously silently ignored)
  * - fixed mkdir() using decimal 700 instead of octal 0700 permissions
@@ -25,6 +26,8 @@
  *
  **/
 class pg_clusterbackup {
+  public const VERSION = '1.2.0';
+
   public const DEBUG_NONE    = 0;
   public const DEBUG_LOG     = 1;
   public const DEBUG_TERSE   = 2;
@@ -36,7 +39,7 @@ class pg_clusterbackup {
   public  array  $log      = [];
   private string $logfile  = '';
 
-  private $ini_file = null;
+  private ?string $ini_file = null;
   private $lock_fp  = null;
 
   public function __construct($conf=[]) {
@@ -237,8 +240,9 @@ class pg_clusterbackup {
   }
   public function help($is_help) {
     if($is_help) {
+      $version = self::VERSION;
       echo <<<TXT
-        pg_clusterbackup
+        pg_clusterbackup {$version}
         ----------------------------------------------------------------------------------------------
         Backup all PostgreSQL Databases from all running Clusters.
 

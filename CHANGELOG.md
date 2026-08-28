@@ -1,6 +1,6 @@
 # Changelog
 
-## v2.0.0 (PHP)
+## 1.2.0 (PHP)
 
 Initial public release. Rewrite of a long-standing internal script, hardened for release:
 
