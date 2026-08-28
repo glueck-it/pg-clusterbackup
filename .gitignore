@@ -1,0 +1,18 @@
+# Generated/local config — never commit real settings (contains hostnames, emails, paths)
+*.ini
+!examples/*.ini.example
+
+# Logs
+*.log
+
+# Editor/OS cruft
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+.DS_Store
+
+# Local scratch/test files — anything explicitly marked local
+local/
+notes/
+*.local.*

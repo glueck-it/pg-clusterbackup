@@ -1,0 +1,8 @@
+hostname             = "db01.example.com"
+backupdir            = "/data/backup/postgresql"
+tempdir              = "/data/backup/postgresql/.tmp"
+email                = "monitor@example.com"
+maxkeep              = "14"
+format               = "c"
+logdir               = "/data/backup/postgresql"
+debug_level          = "1"
