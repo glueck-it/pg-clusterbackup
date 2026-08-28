@@ -48,6 +48,7 @@ class pg_clusterbackup {
 #    $this->debug = true;
     $this->conf($conf);
     $this->settings['logdir'] ??= '';
+    $this->checkdir($this->settings['logdir']);
     $this->logfile              = "{$this->settings['logdir']}/pg_backupcluster.log";
     $this->log(print_r($this->settings, true), self::DEBUG_VERBOSE);
   }
@@ -171,7 +172,6 @@ class pg_clusterbackup {
    */
   public function backup($cluster, $date) {
     $path = "{$this->settings['backupdir']}/{$date}/{$cluster['version']}/{$cluster['cluster']}";
-    $out = null; $ret = null;
     $this->log("Starting backup Cluster: {$cluster['cluster']}");
     $this->checkdir($path);
     $socketdir = escapeshellarg($cluster['socketdir']);
