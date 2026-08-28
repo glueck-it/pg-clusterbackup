@@ -9,6 +9,9 @@ Available today as a **PHP** implementation. A **Bash** port is planned next (se
 [CHANGELOG.md](CHANGELOG.md)); a **PowerShell** port is planned for later, once multi-instance
 PostgreSQL-on-Windows discovery is designed.
 
+Maintained by [Frank Glück](https://www.dozent.net) — PostgreSQL/Linux consulting and
+[PHP training](https://dozent.net/seminare/programmieren/php).
+
 ## Why
 
 Most PostgreSQL backup scripts assume a single cluster and a fixed list of databases. On hosts
@@ -104,9 +107,12 @@ pg_restore -h <socketdir> -p <port> -d <database> <backupdir>/<date>/<version>/<
 
 MIT — see [LICENSE](LICENSE).
 
-## Author
+## About the author
 
-Frank Glück — [Glück IT](https://www.dozent.net)
+Built and maintained by **Frank Glück** ([Glück IT](https://www.dozent.net)).
 
-If this saved you time and you need help with PostgreSQL, Linux ops, or backup strategy in
-general, [get in touch](https://www.dozent.net).
+- Need help with PostgreSQL, Linux ops, or backup strategy? [Get in touch](https://www.dozent.net).
+- Want to actually get good at PHP? I run [PHP programming seminars](https://dozent.net/seminare/programmieren/php)
+  (German), from language basics to OOP.
+- I'm also building [Inside Filings](https://inside-filings.com/news) — tracking notable insider,
+  congressional/White House, and 13F fund moves extracted from SEC filings.
