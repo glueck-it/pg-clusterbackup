@@ -30,29 +30,29 @@ clusters are picked up automatically on the next run.
 ```sh
 git clone https://github.com/glueck-it/pg-clusterbackup.git
 cd pg-clusterbackup/php
-chmod +x pg_clusterdumpall.php
+chmod +x pg_clusterbackup.php
 ```
 
 ## Quick start
 
 ```sh
 # see all options
-./pg_clusterdumpall.php --help
+./pg_clusterbackup.php --help
 
 # write your settings to an ini file once
-./pg_clusterdumpall.php -D /data/backup/postgresql --email you@example.com -n 14 --ini-write
+./pg_clusterbackup.php -D /data/backup/postgresql --email you@example.com -n 14 --ini-write
 
 # from then on, just run it (e.g. from cron) — it reads the ini file
-./pg_clusterdumpall.php
+./pg_clusterbackup.php
 ```
 
 Example crontab entry (daily at 02:30):
 
 ```
-30 2 * * * root /opt/pg-clusterbackup/pg_clusterdumpall.php
+30 2 * * * root /opt/pg-clusterbackup/pg_clusterbackup.php
 ```
 
-An example ini file is in [examples/pg_clusterdumpall.ini.example](examples/pg_clusterdumpall.ini.example).
+An example ini file is in [examples/pg_clusterbackup.ini.example](examples/pg_clusterbackup.ini.example).
 
 ## Options
 

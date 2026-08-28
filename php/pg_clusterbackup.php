@@ -6,10 +6,10 @@
  * Don't edit the source, create a ini-file
  *
  * usage sample:
- * ./pg_clusterdumpall.php --ini-write
- * ./pg_clusterdumpall.php -D /backup/folder --email mail@to.me
+ * ./pg_clusterbackup.php --ini-write
+ * ./pg_clusterbackup.php -D /backup/folder --email mail@to.me
  * additional parameters will also saved in ini-file
- * edit/modify the file pg_clusterdumpall.ini for your behaviour or set values with -xy=123 and --ini-write to persist it
+ * edit/modify the file pg_clusterbackup.ini for your behaviour or set values with -xy=123 and --ini-write to persist it
  * add to cron with or without any parameters (if you edit the .ini)
  *
  * v2 changes:
@@ -243,7 +243,7 @@ class pg_clusterbackup {
         Backup all PostgreSQL Databases from all running Clusters.
 
         Author: Frank Glück (https://www.dozent.net)
-        Create pg_clusterdumpall.ini with settings for override defaults
+        Create pg_clusterbackup.ini with settings for override defaults
         You can combine --ini-write with some other parameters to generate ini-file with given values
 
         --help         shows this page
