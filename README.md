@@ -7,8 +7,8 @@ directories directly otherwise; dumps each database individually (so single data
 restored without touching the rest), dumps globals separately, rotates old generations, and mails
 you the result.
 
-Available today as a **PHP** implementation. A **Bash** port is planned next (see
-[CHANGELOG.md](CHANGELOG.md)); a **PowerShell** port is planned for later, once multi-instance
+Available as **PHP** (`php/`) and **Bash** (`bash/`) implementations, kept behaviorally identical
+per [SPEC.md](SPEC.md). A **PowerShell** port is planned for later, once multi-instance
 PostgreSQL-on-Windows discovery is designed.
 
 Maintained by [Frank Glück](https://www.dozent.net) — PostgreSQL/Linux consulting and
@@ -26,7 +26,8 @@ clusters are picked up automatically on the next run.
 
 - Debian/Ubuntu with `postgresql-common` (provides `pg_lsclusters`), **or** RHEL/CentOS/Rocky/Alma
   with PostgreSQL installed from the distro package or a PGDG `postgresqlNN-server` package
-- PHP CLI (for the PHP implementation)
+- PHP CLI (for `php/`), or Bash 4+ with `flock`, `mail`/`mailx`, and — only when `pg_lsclusters`
+  is present — `jq` to parse its JSON output (for `bash/`)
 - Passwordless `sudo -u postgres` for the user running this script (typically root via cron)
 - Enough free space on the backup destination; `tempdir` and `backupdir` may be on different
   filesystems, the script handles the fallback
@@ -37,22 +38,31 @@ your installation uses a non-standard location. See [SPEC.md](SPEC.md) for how d
 
 ## Install
 
-Just want the script, no repo clutter? Download the single file, pinned to a release tag:
+Just want the script, no repo clutter? Download the single file, pinned to a release tag —
+pick PHP or Bash:
 
 ```sh
-curl -O https://raw.githubusercontent.com/glueck-it/pg-clusterbackup/v1.3.0/php/pg_clusterbackup.php
+curl -O https://raw.githubusercontent.com/glueck-it/pg-clusterbackup/v1.4.0/php/pg_clusterbackup.php
 chmod +x pg_clusterbackup.php
+```
+
+```sh
+curl -O https://raw.githubusercontent.com/glueck-it/pg-clusterbackup/v1.4.0/bash/pg_clusterbackup.sh
+chmod +x pg_clusterbackup.sh
 ```
 
 Or clone the full repo (includes examples, SPEC.md, CHANGELOG.md):
 
 ```sh
 git clone https://github.com/glueck-it/pg-clusterbackup.git
-cd pg-clusterbackup/php
-chmod +x pg_clusterbackup.php
+cd pg-clusterbackup/php    # or: cd pg-clusterbackup/bash
+chmod +x pg_clusterbackup.*
 ```
 
 ## Quick start
+
+Both implementations take the same options (see SPEC.md) — examples below use the PHP one,
+swap in `pg_clusterbackup.sh` for the Bash port.
 
 ```sh
 # see all options
@@ -109,13 +119,13 @@ pg_restore -h <socketdir> -p <port> -d <database> <backupdir>/<date>/<version>/<
 
 - Exclusive lock file — an overlapping cron run refuses to start instead of corrupting temp files
 - Old generations are deleted only *after* a successful run, never before
-- All values passed to shell commands are escaped
+- No raw values are interpolated into a shell string (escaped in PHP, passed as separate argv
+  entries in Bash) — both avoid the classic shell-injection footgun
 - Temp-to-backup moves work across filesystem boundaries
 - Restrictive `umask` while dumping, so temp files aren't briefly world-readable
 
 ## Roadmap
 
-- [ ] Bash/`sh` port
 - [ ] Parallel `pg_dump` (directory format + `--jobs`, and/or concurrent per-database dumps)
 - [ ] PowerShell port for Windows (multi-instance discovery TBD)
 

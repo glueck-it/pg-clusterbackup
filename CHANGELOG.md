@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.4.0
+
+- Added the Bash port (`bash/pg_clusterbackup.sh`), matching SPEC.md: same CLI options, ini
+  format (incl. `pgdata_globs[]`), lock file, both discovery strategies, delete-after-success
+  rotation, and cross-filesystem-safe moves (`mv` already handles this natively on Linux).
+  Arguments are passed to commands as separate argv entries rather than interpolated into a
+  shell string, so there's no `escapeshellarg`-equivalent needed for injection-safety.
+- PHP: no functional changes, version bumped to 1.4.0 to match the project-wide release (see
+  SPEC.md "Versioning" — the project shares one version number across implementations).
+
 ## 1.3.0 (PHP)
 
 - Added RHEL/CentOS/Rocky/Alma support: when `pg_lsclusters` isn't installed, falls back to
@@ -31,7 +41,6 @@ Initial public release. Rewrite of a long-standing internal script, hardened for
 
 ## Unreleased
 
-- Bash/`sh` port (`bash/`) — planned.
 - PowerShell port (`powershell/`) — planned, needs its own cluster-discovery design since Windows
   supports multiple parallel PostgreSQL versions/instances but has no `pg_lsclusters` equivalent.
 - Parallel `pg_dump` (directory format + `--jobs`, and/or concurrent dumps across databases).

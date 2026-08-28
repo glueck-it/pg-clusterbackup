@@ -1,7 +1,7 @@
 #!/usr/bin/php
 <?php
 /**
- * pg_clusterbackup 1.3.0
+ * pg_clusterbackup 1.4.0
  * A class which backups all PostgreSQL clusters with all databases in separate files
  * Don't edit the source, create a ini-file
  *
@@ -13,6 +13,8 @@
  * add to cron with or without any parameters (if you edit the .ini)
  *
  * Changelog:
+ * 1.4.0
+ * - no functional changes; version bumped to match the 1.4.0 project release (bash port added)
  * 1.3.0
  * - added RHEL/CentOS/Rocky/Alma support: falls back to scanning pgdata_globs + postmaster.pid
  *   when pg_lsclusters isn't installed (see SPEC.md "Cluster / instance discovery")
@@ -31,7 +33,7 @@
  *
  **/
 class pg_clusterbackup {
-  public const VERSION = '1.3.0';
+  public const VERSION = '1.4.0';
 
   public const DEBUG_NONE    = 0;
   public const DEBUG_LOG     = 1;
