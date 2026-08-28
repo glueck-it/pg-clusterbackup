@@ -6,9 +6,55 @@ implementation in line with it, then update CHANGELOG.md.
 
 ## Purpose
 
-Backs up all databases of every **running** PostgreSQL cluster detected via `pg_lsclusters -h -j`
-into per-day, per-cluster directories, keeps a rolling number of daily generations, and mails a
-run summary.
+Backs up all databases of every **running** PostgreSQL cluster/instance on the host into
+per-day, per-cluster directories, keeps a rolling number of daily generations, and mails a run
+summary. How clusters are found is distro-dependent — see "Cluster / instance discovery" below.
+
+## Versioning
+
+The whole project (all language implementations together) shares one version number, not one
+per language — e.g. "1.3.0" describes the state of `php/`, `bash/`, etc. combined at that point,
+even if a given release only actually touched one of them. Record what changed per area in
+CHANGELOG.md.
+
+## Cluster / instance discovery
+
+Two discovery strategies, tried in order. An implementation must support at least strategy 1
+where the tooling exists, and fall back to strategy 2 everywhere else.
+
+### 1. `pg_lsclusters` (Debian/Ubuntu, via `postgresql-common`)
+
+If the `pg_lsclusters` binary exists, use `pg_lsclusters -h -j` and trust its `version`,
+`cluster`, `running`, `port`, `socketdir` fields directly. This is the only tool that reports
+multiple *clusters of the same major version* (e.g. `main` + a second cluster on another port),
+so prefer it whenever available.
+
+### 2. `postmaster.pid` scan (RHEL/CentOS/Rocky/Alma and any other Linux)
+
+RHEL-family PostgreSQL (distro package or PGDG `postgresqlNN-server` packages) has no
+multi-cluster concept and no equivalent listing tool — each major version is normally exactly
+one instance, one data directory. Detect it generically, using only facts PostgreSQL itself
+guarantees, not distro conventions:
+
+1. Look for data directories under a configurable list of glob patterns (default:
+   `/var/lib/pgsql/data`, `/var/lib/pgsql/*/data` — covers both the single-instance distro
+   package and versioned PGDG packages; additional globs can be added in the ini file for
+   non-standard installs).
+2. A directory is a valid PG data directory if it contains `PG_VERSION` — its content is the
+   major version string (`version`).
+3. It's running if `postmaster.pid` exists in that directory. If not present, skip it (log at
+   terse level) exactly like a `pg_lsclusters` cluster with `running != 1`.
+4. If running, **parse `postmaster.pid` directly** instead of asking the distro anything:
+   line 4 is the port, line 5 is the socket directory (first entry if it lists more than one,
+   comma-separated). This format is a PostgreSQL server guarantee, identical across distros —
+   it's the same mechanism `pg_ctl`/`pg_isready` rely on, not something specific to RHEL.
+5. `cluster` name: RHEL has no user-facing cluster name, so use `main` — there is normally only
+   one instance per version, so this does not collide. (A future multi-instance-per-version setup
+   on RHEL would need a real name source; out of scope for 1.3.0.)
+
+Both strategies must produce the same shape: `{version, cluster, running, port, socketdir}`, so
+the rest of the pipeline (database enumeration, `pg_dump`, directory layout) is identical
+regardless of which one found the instance.
 
 ## CLI options
 

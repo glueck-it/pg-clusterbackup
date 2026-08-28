@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.3.0 (PHP)
+
+- Added RHEL/CentOS/Rocky/Alma support: when `pg_lsclusters` isn't installed, falls back to
+  scanning configurable `pgdata_globs` and reading `postmaster.pid` directly for port/socket dir.
+  See [SPEC.md](SPEC.md) "Cluster / instance discovery" for the design.
+- Fixed `ini_get_settings()` writing array-type settings under a `[section]` header, which caused
+  every setting written *after* it to be silently absorbed into that array on the next
+  `--ini-write`/read. Surfaced by adding the first real array setting (`pgdata_globs`).
+
 ## 1.2.0 (PHP)
 
 Initial public release. Rewrite of a long-standing internal script, hardened for release:
@@ -16,6 +25,9 @@ Initial public release. Rewrite of a long-standing internal script, hardened for
 - Fixed a fatal error in the failure-mail path when the backup object itself failed to construct.
 - Added a lock file so overlapping cron runs can no longer corrupt each other's temp files.
 - Restricted `umask` so temporary dump files aren't briefly world-readable.
+- Fixed the executable bit not being tracked correctly by git on Windows.
+- `logdir` is now created before first use, and the example config points it at its own
+  subfolder instead of the backup root.
 
 ## Unreleased
 

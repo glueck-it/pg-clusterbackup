@@ -1,7 +1,7 @@
 #!/usr/bin/php
 <?php
 /**
- * pg_clusterbackup 1.2.0
+ * pg_clusterbackup 1.3.0
  * A class which backups all PostgreSQL clusters with all databases in separate files
  * Don't edit the source, create a ini-file
  *
@@ -13,6 +13,11 @@
  * add to cron with or without any parameters (if you edit the .ini)
  *
  * Changelog:
+ * 1.3.0
+ * - added RHEL/CentOS/Rocky/Alma support: falls back to scanning pgdata_globs + postmaster.pid
+ *   when pg_lsclusters isn't installed (see SPEC.md "Cluster / instance discovery")
+ * - fixed ini_get_settings() writing array settings under a [section] header, which caused every
+ *   setting written after it to be silently nested inside that array on the next --ini-write/read
  * 1.2.0
  * - fixed load_ini() referencing an undefined $conf variable (fatal TypeError after first --ini-write)
  * - fixed getopt() to actually parse -D/-T/-L/-F/-h/-d/-n/--email (previously silently ignored)
@@ -26,7 +31,7 @@
  *
  **/
 class pg_clusterbackup {
-  public const VERSION = '1.2.0';
+  public const VERSION = '1.3.0';
 
   public const DEBUG_NONE    = 0;
   public const DEBUG_LOG     = 1;
@@ -63,6 +68,7 @@ class pg_clusterbackup {
     $this->settings['format']      = $conf['F']        ?? $this->settings['format']      ?? 'c'; # Custom Format
     $this->settings['logdir']      = $conf['L']        ?? $this->settings['logdir']      ?? $this->settings['backupdir'];
     $this->settings['debug_level'] = $conf['d']        ?? $this->settings['debug_level'] ?? self::DEBUG_LOG;
+    $this->settings['pgdata_globs'] ??= ['/var/lib/pgsql/data', '/var/lib/pgsql/*/data'];
     $this->help(isset($conf['help']));
   }
   private function load_ini($ini) {
@@ -76,15 +82,7 @@ class pg_clusterbackup {
     $out = [];
     foreach($this->settings as $key => $value) {
       if(is_array($value)) {
-        $out[] = "[{$key}]";
-        foreach($value as $ke => $va) {
-          if(is_array($va)) {
-            foreach($va as $v) $out .= sprintf("%-20s = \"%s\"", "{$ke}[]", $v);
-          }
-          else {
-            $out[] = sprintf("%-20s = \"%s\"", $ke, $va);
-          }
-        }
+        foreach($value as $v) $out[] = sprintf("%-20s = \"%s\"", "{$key}[]", $v);
       }
       else {
         $out[] = sprintf("%-20s = \"%s\"", $key, $value);
@@ -147,7 +145,41 @@ class pg_clusterbackup {
 
   }
   public function clusters() {
-    return json_decode(shell_exec('pg_lsclusters -h -j'), true);
+    if(trim((string)shell_exec('command -v pg_lsclusters 2>/dev/null'))) {
+      return json_decode(shell_exec('pg_lsclusters -h -j'), true);
+    }
+    return $this->scan_instances();
+  }
+  /**
+   * Fallback discovery for distros without pg_lsclusters (RHEL/CentOS/Rocky/Alma and others):
+   * scans configured data-directory globs and reads postmaster.pid directly. Its format (port
+   * on line 4, socket dir on line 5) is a PostgreSQL server guarantee, not a distro convention,
+   * so this works the same way pg_ctl/pg_isready determine a running instance's port.
+   */
+  private function scan_instances() {
+    $instances = [];
+    foreach($this->settings['pgdata_globs'] as $glob_pattern) {
+      foreach(glob($glob_pattern) as $datadir) {
+        $version_file = "{$datadir}/PG_VERSION";
+        if(!is_file($version_file)) continue;
+        $pidfile = "{$datadir}/postmaster.pid";
+        $running = is_file($pidfile);
+        $port = $socketdir = null;
+        if($running) {
+          $lines     = file($pidfile, FILE_IGNORE_NEW_LINES);
+          $port      = $lines[3] ?? null;
+          $socketdir = explode(',', $lines[4] ?? '')[0] ?: null;
+        }
+        $instances[] = [
+          'version'   => trim(file_get_contents($version_file)),
+          'cluster'   => 'main',
+          'running'   => $running ? 1 : 0,
+          'port'      => $port,
+          'socketdir' => $socketdir,
+        ];
+      }
+    }
+    return $instances;
   }
   public function exec(string $cmd) {
     $out = $ret = null;

@@ -1,9 +1,11 @@
 # pg-clusterbackup
 
-Backs up **every database of every running PostgreSQL cluster** on a Debian/Ubuntu host in one
-cron job — no manual per-cluster, per-database configuration needed. Detects clusters via
-`pg_lsclusters`, dumps each database individually (so single databases can be restored without
-touching the rest), dumps globals separately, rotates old generations, and mails you the result.
+Backs up **every database of every running PostgreSQL cluster/instance** on a Debian/Ubuntu or
+RHEL-family (CentOS/Rocky/Alma) host in one cron job — no manual per-cluster, per-database
+configuration needed. Detects clusters via `pg_lsclusters` where available, or by scanning data
+directories directly otherwise; dumps each database individually (so single databases can be
+restored without touching the rest), dumps globals separately, rotates old generations, and mails
+you the result.
 
 Available today as a **PHP** implementation. A **Bash** port is planned next (see
 [CHANGELOG.md](CHANGELOG.md)); a **PowerShell** port is planned for later, once multi-instance
@@ -22,18 +24,23 @@ clusters are picked up automatically on the next run.
 
 ## Requirements
 
-- Debian/Ubuntu with `postgresql-common` (provides `pg_lsclusters`)
+- Debian/Ubuntu with `postgresql-common` (provides `pg_lsclusters`), **or** RHEL/CentOS/Rocky/Alma
+  with PostgreSQL installed from the distro package or a PGDG `postgresqlNN-server` package
 - PHP CLI (for the PHP implementation)
 - Passwordless `sudo -u postgres` for the user running this script (typically root via cron)
 - Enough free space on the backup destination; `tempdir` and `backupdir` may be on different
   filesystems, the script handles the fallback
+
+On RHEL-family hosts without `pg_lsclusters`, data directories are found via the `pgdata_globs`
+setting (default: `/var/lib/pgsql/data`, `/var/lib/pgsql/*/data`) — override it in the ini file if
+your installation uses a non-standard location. See [SPEC.md](SPEC.md) for how discovery works.
 
 ## Install
 
 Just want the script, no repo clutter? Download the single file, pinned to a release tag:
 
 ```sh
-curl -O https://raw.githubusercontent.com/glueck-it/pg-clusterbackup/v1.2.0/php/pg_clusterbackup.php
+curl -O https://raw.githubusercontent.com/glueck-it/pg-clusterbackup/v1.3.0/php/pg_clusterbackup.php
 chmod +x pg_clusterbackup.php
 ```
 
