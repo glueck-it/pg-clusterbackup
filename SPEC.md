@@ -19,8 +19,8 @@ CHANGELOG.md.
 
 ## Cluster / instance discovery
 
-Two discovery strategies, tried in order. An implementation must support at least strategy 1
-where the tooling exists, and fall back to strategy 2 everywhere else.
+Per-platform discovery strategies. An implementation must support the primary strategy for its
+platform where the tooling exists, and fall back to the platform's secondary strategy otherwise.
 
 ### 1. `pg_lsclusters` (Debian/Ubuntu, via `postgresql-common`)
 
@@ -52,9 +52,39 @@ guarantees, not distro conventions:
    one instance per version, so this does not collide. (A future multi-instance-per-version setup
    on RHEL would need a real name source; out of scope for 1.3.0.)
 
-Both strategies must produce the same shape: `{version, cluster, running, port, socketdir}`, so
-the rest of the pipeline (database enumeration, `pg_dump`, directory layout) is identical
-regardless of which one found the instance.
+### 3. Windows service enumeration (PowerShell — planned, not yet implemented)
+
+Windows has no `pg_lsclusters` equivalent either, but this is closer to Debian's model than to
+RHEL's: every PostgreSQL install (EDB installer, Chocolatey, etc.) registers itself as its own
+named Windows service running `pg_ctl.exe`, one per version/instance — and Windows genuinely
+supports several instances side by side under different service names/ports, unlike RHEL.
+
+**Deliberately not a port scanner and not a blind directory scan.** A listening port doesn't
+tell you it's PostgreSQL, which version, or where its data directory is; you'd have to guess a
+port range and probe every hit. Windows already tracks this authoritatively — use it:
+
+1. `Get-CimInstance Win32_Service | Where-Object { $_.PathName -match 'pg_ctl\.exe' }` — finds
+   every PostgreSQL service regardless of install location or naming, no guessing needed.
+2. Extract the data directory from the service's own command line — the `-D "<path>"` argument
+   inside `PathName` (e.g. `"...\pg_ctl.exe" runservice -N "postgresql-x64-15" -D "C:\Program
+   Files\PostgreSQL\15\data" -w`). This is the service definition's authoritative source, not a
+   guess from a naming convention.
+3. `running`: the service's `State -eq 'Running'` — more reliable than a pidfile existence check.
+4. `version`: read `PG_VERSION` from the data directory, same as strategy 2 — not parsed from the
+   install path, which is user-configurable.
+5. `port`: read `postmaster.pid` line 4 — the same pidfile format PostgreSQL uses on every
+   platform. Windows PostgreSQL has no Unix socket, so `socketdir` is not applicable there.
+6. `cluster` name: the Windows service name itself (e.g. `postgresql-x64-15`) — unlike RHEL's
+   hardcoded `main`, this correctly distinguishes genuine multiple instances of the same version.
+
+Fallback (portable/non-service installs that never register a service): scan a configurable list
+of glob patterns, the same `pgdata_globs`-style mechanism as strategy 2, for parity with the
+Linux fallback.
+
+All three strategies must produce the same shape: `{version, cluster, running, port, socketdir}`,
+so the rest of the pipeline (database enumeration, `pg_dump`, directory layout) is identical
+regardless of which one found the instance. On Windows, `socketdir` is empty/null and
+implementations must connect via `-h localhost -p <port>` instead.
 
 ## CLI options
 
