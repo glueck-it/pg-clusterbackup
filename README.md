@@ -11,8 +11,7 @@ Available as **PHP** (`php/`) and **Bash** (`bash/`) implementations, kept behav
 per [SPEC.md](SPEC.md). A **PowerShell** port is planned for later, once multi-instance
 PostgreSQL-on-Windows discovery is designed.
 
-Maintained by [Frank Glück](https://www.dozent.net) — PostgreSQL/Linux consulting and
-[PHP training](https://dozent.net/seminare/programmieren/php).
+Maintained by [Frank Glück](https://www.dozent.net) — database consultant, developer, and trainer.
 
 ## Why
 
@@ -135,10 +134,21 @@ MIT — see [LICENSE](LICENSE).
 
 ## About the author
 
-Built and maintained by **Frank Glück** ([Glück IT](https://www.dozent.net)).
+Built and maintained by **Frank Glück** ([Glück IT](https://www.dozent.net)) — a consultant,
+developer, and trainer working with databases and programming languages. A lot of my current
+project work is migrating databases to PostgreSQL from
+[Oracle](https://dozent.net/seminare/postgresql/migration/migration-von-oracle-zu-postgresql),
+[SQL Server](https://dozent.net/seminare/postgresql/migration/postgresql-migration-von-sql-server),
+[DB2](https://dozent.net/seminare/postgresql/migration/postgresql-migration-von-db2),
+[Informix](https://dozent.net/seminare/postgresql/migration/postgresql-migration-von-informix),
+[Sybase](https://dozent.net/seminare/postgresql/migration/postgresql-migration-von-sybase), or
+[MS Access](https://dozent.net/seminare/postgresql/migration/postgresql-migration-von-ms-access),
+plus data analysis work that isn't limited to PostgreSQL.
 
-- Need help with PostgreSQL, Linux ops, or backup strategy? [Get in touch](https://www.dozent.net).
-- Want to actually get good at PHP? I run [PHP programming seminars](https://dozent.net/seminare/programmieren/php)
-  (German), from language basics to OOP.
+- Need help with PostgreSQL itself, a migration, or backup strategy? [Get in touch](https://www.dozent.net).
+- I also run seminars (German) on [PostgreSQL administration](https://dozent.net/seminare/postgresql/postgresql-administration),
+  [performance tuning](https://dozent.net/seminare/postgresql/postgresql-performance-tuning),
+  [PL/pgSQL](https://dozent.net/seminare/postgresql/plpgsql-programmierung), SQL Server (T-SQL/SSRS/SSAS),
+  [PHP](https://dozent.net/seminare/programmieren/php), JS, and other web technologies.
 - I'm also building [Inside Filings](https://inside-filings.com/news) — tracking notable insider,
   congressional/White House, and 13F fund moves extracted from SEC filings.
