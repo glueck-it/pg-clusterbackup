@@ -1,5 +1,25 @@
 # Changelog
 
+## 1.5.0
+
+- Added the PowerShell port (`powershell/pg_clusterbackup.ps1`). Windows has no `pg_lsclusters`
+  equivalent, so discovery is a new, dedicated strategy: enumerate Windows services running
+  `pg_ctl.exe` via `Get-CimInstance Win32_Service`, read the data directory straight from the
+  service's own `-D` command-line argument (not guessed from a path convention), with a
+  `pgdata_globs`-style glob scan as fallback for non-service/portable installs. Deliberately not
+  a port scanner or blind directory scan — see SPEC.md "Cluster / instance discovery" strategy 3.
+- PowerShell deviation (documented in SPEC.md): `-D`/`-d` can't coexist as PowerShell only
+  parameter names/aliases are case-insensitive, so debug level is `-DebugLevel`/`-dl` instead of
+  `-d`; long options use full names (`-Help`, `-IniWrite`, ...) rather than `--double-dash`.
+- No Windows local MTA, so mail sending requires an `smtp_server` ini setting; skipped (logged,
+  not fatal) when unset.
+- No `sudo -u postgres` equivalent on Windows — requires `pg_hba.conf`/credentials that let the
+  running user connect as the `postgres` role via `localhost`.
+- PHP/Bash: no functional changes, version bumped to 1.5.0 to match the project-wide release.
+- Verified: parser/AST check, `-Help`, `-IniWrite`/`-IniShow` roundtrip, and both discovery
+  strategies (service-based and glob fallback, running/not-running) against simulated data
+  directories and a mocked `Win32_Service` object.
+
 ## 1.4.0
 
 - Added the Bash port (`bash/pg_clusterbackup.sh`), matching SPEC.md: same CLI options, ini
@@ -41,6 +61,4 @@ Initial public release. Rewrite of a long-standing internal script, hardened for
 
 ## Unreleased
 
-- PowerShell port (`powershell/`) — planned, needs its own cluster-discovery design since Windows
-  supports multiple parallel PostgreSQL versions/instances but has no `pg_lsclusters` equivalent.
 - Parallel `pg_dump` (directory format + `--jobs`, and/or concurrent dumps across databases).

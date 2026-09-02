@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# pg_clusterbackup 1.4.0 (bash port)
+# pg_clusterbackup 1.5.0 (bash port)
 # Backs up every database of every running PostgreSQL cluster/instance on the host into
 # separate files. Don't edit the defaults here — create an ini file instead.
 # Full behavior contract: see SPEC.md.
@@ -13,7 +13,7 @@
 # which is unreliable inside functions/conditionals for a script this size.
 set -uo pipefail
 
-VERSION="1.4.0"
+VERSION="1.5.0"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 DEBUG_LOG=1

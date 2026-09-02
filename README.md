@@ -1,15 +1,14 @@
 # pg-clusterbackup
 
-Backs up **every database of every running PostgreSQL cluster/instance** on a Debian/Ubuntu or
-RHEL-family (CentOS/Rocky/Alma) host in one cron job — no manual per-cluster, per-database
-configuration needed. Detects clusters via `pg_lsclusters` where available, or by scanning data
-directories directly otherwise; dumps each database individually (so single databases can be
-restored without touching the rest), dumps globals separately, rotates old generations, and mails
-you the result.
+Backs up **every database of every running PostgreSQL cluster/instance** on Debian/Ubuntu,
+RHEL-family (CentOS/Rocky/Alma), or Windows in one scheduled job — no manual per-cluster,
+per-database configuration needed. Detects instances via `pg_lsclusters`, Windows services, or by
+scanning data directories directly, whichever applies; dumps each database individually (so
+single databases can be restored without touching the rest), dumps globals separately, rotates
+old generations, and mails you the result.
 
-Available as **PHP** (`php/`) and **Bash** (`bash/`) implementations, kept behaviorally identical
-per [SPEC.md](SPEC.md). A **PowerShell** port is planned for later, once multi-instance
-PostgreSQL-on-Windows discovery is designed.
+Available as **PHP** (`php/`), **Bash** (`bash/`), and **PowerShell** (`powershell/`)
+implementations, kept behaviorally identical per [SPEC.md](SPEC.md).
 
 Maintained by [Frank Glück](https://www.dozent.net) — database consultant, developer, and trainer.
 
@@ -23,45 +22,56 @@ clusters are picked up automatically on the next run.
 
 ## Requirements
 
-- Debian/Ubuntu with `postgresql-common` (provides `pg_lsclusters`), **or** RHEL/CentOS/Rocky/Alma
-  with PostgreSQL installed from the distro package or a PGDG `postgresqlNN-server` package
-- PHP CLI (for `php/`), or Bash 4+ with `flock`, `mail`/`mailx`, and — only when `pg_lsclusters`
-  is present — `jq` to parse its JSON output (for `bash/`)
-- Passwordless `sudo -u postgres` for the user running this script (typically root via cron)
+- Debian/Ubuntu with `postgresql-common` (provides `pg_lsclusters`), RHEL/CentOS/Rocky/Alma with
+  PostgreSQL from the distro package or a PGDG `postgresqlNN-server` package, or Windows with
+  PostgreSQL installed as a service (EDB installer, Chocolatey, ...)
+- PHP CLI (for `php/`), Bash 4+ with `flock`, `mail`/`mailx`, and — only when `pg_lsclusters` is
+  present — `jq` (for `bash/`), or PowerShell 5.1+/7+ (for `powershell/`)
+- Linux: passwordless `sudo -u postgres` for the user running this script (typically root via
+  cron). Windows: no `sudo` equivalent — configure `pg_hba.conf`/credentials so the running user
+  can connect as the `postgres` role via `localhost`.
+- Windows only: an `smtp_server` ini setting to send mail (there's no local MTA to fall back to)
 - Enough free space on the backup destination; `tempdir` and `backupdir` may be on different
   filesystems, the script handles the fallback
 
-On RHEL-family hosts without `pg_lsclusters`, data directories are found via the `pgdata_globs`
-setting (default: `/var/lib/pgsql/data`, `/var/lib/pgsql/*/data`) — override it in the ini file if
-your installation uses a non-standard location. See [SPEC.md](SPEC.md) for how discovery works.
+On RHEL-family hosts without `pg_lsclusters`, and on Windows for non-service/portable installs,
+data directories are found via the `pgdata_globs` setting (Linux default: `/var/lib/pgsql/data`,
+`/var/lib/pgsql/*/data`; Windows default: `C:\Program Files\PostgreSQL\*\data`) — override it in
+the ini file for non-standard locations. See [SPEC.md](SPEC.md) for how discovery works on each
+platform.
 
 ## Install
 
 Just want the script, no repo clutter? Download the single file, pinned to a release tag —
-pick PHP or Bash:
+pick PHP, Bash, or PowerShell:
 
 ```sh
-curl -O https://raw.githubusercontent.com/glueck-it/pg-clusterbackup/v1.4.0/php/pg_clusterbackup.php
+curl -O https://raw.githubusercontent.com/glueck-it/pg-clusterbackup/v1.5.0/php/pg_clusterbackup.php
 chmod +x pg_clusterbackup.php
 ```
 
 ```sh
-curl -O https://raw.githubusercontent.com/glueck-it/pg-clusterbackup/v1.4.0/bash/pg_clusterbackup.sh
+curl -O https://raw.githubusercontent.com/glueck-it/pg-clusterbackup/v1.5.0/bash/pg_clusterbackup.sh
 chmod +x pg_clusterbackup.sh
+```
+
+```powershell
+Invoke-WebRequest https://raw.githubusercontent.com/glueck-it/pg-clusterbackup/v1.5.0/powershell/pg_clusterbackup.ps1 -OutFile pg_clusterbackup.ps1
 ```
 
 Or clone the full repo (includes examples, SPEC.md, CHANGELOG.md):
 
 ```sh
 git clone https://github.com/glueck-it/pg-clusterbackup.git
-cd pg-clusterbackup/php    # or: cd pg-clusterbackup/bash
+cd pg-clusterbackup/php    # or: cd pg-clusterbackup/bash, cd pg-clusterbackup/powershell
 chmod +x pg_clusterbackup.*
 ```
 
 ## Quick start
 
-Both implementations take the same options (see SPEC.md) — examples below use the PHP one,
-swap in `pg_clusterbackup.sh` for the Bash port.
+All three implementations take equivalent options (see SPEC.md for the exact PowerShell naming
+differences) — examples below use the PHP one, swap in `pg_clusterbackup.sh` or
+`pg_clusterbackup.ps1` for the other ports.
 
 ```sh
 # see all options
@@ -79,6 +89,16 @@ Example crontab entry (daily at 02:30):
 ```
 30 2 * * * root /opt/pg-clusterbackup/pg_clusterbackup.php
 ```
+
+PowerShell equivalent (long option names instead of `--double-dash`, see Options below):
+
+```powershell
+.\pg_clusterbackup.ps1 -D C:\Backup\PostgreSQL -Email you@example.com -MaxKeep 14 -IniWrite
+.\pg_clusterbackup.ps1
+```
+
+Register it as a Scheduled Task for unattended daily runs (`Register-ScheduledTask` or the Task
+Scheduler GUI).
 
 An example ini file is in [examples/pg_clusterbackup.ini.example](examples/pg_clusterbackup.ini.example).
 
@@ -99,7 +119,11 @@ An example ini file is in [examples/pg_clusterbackup.ini.example](examples/pg_cl
 |       | `--ini-show`  | print current effective settings in ini format        |                              |
 |       | `--help`      | show usage                                            |                              |
 
-Full behavior contract for all language ports: [SPEC.md](SPEC.md).
+PowerShell uses the same short flags except debug level (`-DebugLevel`/`-dl` instead of `-d`,
+since PowerShell parameter names are case-insensitive and can't tell `-D` and `-d` apart), and
+full names instead of `--double-dash` for the flag-only options (`-Help`, `-IniWrite`,
+`-IniShow`, `-Email`). See [SPEC.md](SPEC.md) for the exact mapping and the full behavior
+contract for all three ports.
 
 ## What it produces
 
@@ -116,17 +140,18 @@ pg_restore -h <socketdir> -p <port> -d <database> <backupdir>/<date>/<version>/<
 
 ## Safety features
 
-- Exclusive lock file — an overlapping cron run refuses to start instead of corrupting temp files
+- Exclusive lock file (or lock-file-equivalent handle on Windows) — an overlapping scheduled run
+  refuses to start instead of corrupting temp files
 - Old generations are deleted only *after* a successful run, never before
-- No raw values are interpolated into a shell string (escaped in PHP, passed as separate argv
-  entries in Bash) — both avoid the classic shell-injection footgun
-- Temp-to-backup moves work across filesystem boundaries
-- Restrictive `umask` while dumping, so temp files aren't briefly world-readable
+- No raw values are interpolated into a shell string (escaped in PHP, passed as separate
+  argv/argument entries in Bash and PowerShell) — all three avoid the classic shell-injection
+  footgun
+- Temp-to-backup moves work across filesystem/drive boundaries
+- Restrictive `umask` while dumping on Linux, so temp files aren't briefly world-readable
 
 ## Roadmap
 
 - [ ] Parallel `pg_dump` (directory format + `--jobs`, and/or concurrent per-database dumps)
-- [ ] PowerShell port for Windows (multi-instance discovery TBD)
 
 ## License
 

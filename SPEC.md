@@ -1,6 +1,6 @@
 # SPEC — behavior contract for all language implementations
 
-This document defines the behavior every implementation (`php/`, `bash/`, later `powershell/`)
+This document defines the behavior every implementation (`php/`, `bash/`, `powershell/`)
 must match. When fixing a bug or adding a feature, update this file first, then bring every
 implementation in line with it, then update CHANGELOG.md.
 
@@ -105,6 +105,12 @@ implementations must connect via `-h localhost -p <port>` instead.
 
 All non-flag options are also persisted to / read from the ini file; CLI values always win over
 ini values.
+
+**PowerShell deviation:** PowerShell parameter names/aliases are case-insensitive, so `-D`
+(backup dir) and `-d` (debug level) can't coexist as distinct flags there. The PowerShell port
+keeps `-D`/`-BackupDir`, but debug level is `-DebugLevel` (alias `-dl`) instead of `-d`. It also
+uses full names for the long options (`-Help`, `-IniWrite`, `-IniShow`, `-Email`) rather than
+`--double-dash` syntax, since that isn't idiomatic PowerShell. Behavior is otherwise identical.
 
 ## Ini file format
 
