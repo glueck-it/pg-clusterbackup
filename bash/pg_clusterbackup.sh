@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# pg_clusterbackup 1.5.0 (bash port)
+# pg_clusterbackup 1.6.0 (bash port)
 # Backs up every database of every running PostgreSQL cluster/instance on the host into
 # separate files. Don't edit the defaults here — create an ini file instead.
 # Full behavior contract: see SPEC.md.
@@ -11,9 +11,10 @@
 #
 # Errors are handled explicitly (checked exit codes -> fatal()) rather than via `set -e`,
 # which is unreliable inside functions/conditionals for a script this size.
+# Requires bash 4.3+ (associative arrays, and `wait -n` for parallel dumps).
 set -uo pipefail
 
-VERSION="1.5.0"
+VERSION="1.6.0"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 DEBUG_LOG=1
@@ -157,27 +158,71 @@ backup_cluster() {
   checkdir "$path"
 
   local sql="SELECT datname FROM pg_database WHERE NOT datistemplate AND datname <> 'postgres'"
-  local databases db count=0 tempfile
+  local databases db
   databases="$(sudo -u postgres psql -h "$socketdir" -p "$port" -U postgres --tuples-only -P format=unaligned -c "$sql")" \
     || fatal "Error listing databases for cluster ${cluster}"
 
+  local -a dbarray=()
   while IFS= read -r db; do
-    [[ -n "$db" ]] || continue
-    count=$((count + 1))
-    log "Starting backup Database: ${db} "
-    tempfile="${SETTINGS[tempdir]}/${db}.cus"
-    sudo -u postgres pg_dump -c -h "$socketdir" -p "$port" -F"${SETTINGS[format]}" -f "$tempfile" "$db" \
-      || fatal "Error dumping database ${db}"
-    move_file "$tempfile" "${path}/${db}.cus"
+    [[ -n "$db" ]] && dbarray+=("$db")
   done <<< "$databases"
 
-  (( count == 0 )) && log "No databases for backup!"
+  if [[ ${#dbarray[@]} -eq 0 ]]; then
+    log 'No databases for backup!'
+  else
+    backup_databases "$path" "$socketdir" "$port" "${dbarray[@]}"
+  fi
 
   log "Starting backup globals" "$DEBUG_LOG"
   local globalsfile="${SETTINGS[tempdir]}/globals.sql"
   sudo -u postgres pg_dumpall -g -h "$socketdir" -p "$port" -f "$globalsfile" \
     || fatal "Error dumping globals for cluster ${cluster}"
   move_file "$globalsfile" "${path}/globals.sql"
+}
+
+# Dumps up to `parallel_jobs` databases concurrently (default 1 = unchanged sequential
+# behavior). Not pg_dump's own -j/--jobs: that requires the directory format and would break
+# the single-file-per-database restore story. See SPEC.md "Parallel database dumps".
+backup_databases() {
+  local path="$1" socketdir="$2" port="$3"
+  shift 3
+  local -a queue=("$@")
+  local jobs="${SETTINGS[parallel_jobs]:-1}"
+  local -A pid_db=() pid_tmp=()
+  local active=0 failed="" db tempfile pid rc
+
+  while [[ ( ${#queue[@]} -gt 0 && -z "$failed" ) || $active -gt 0 ]]; do
+    while [[ ${#queue[@]} -gt 0 && -z "$failed" && $active -lt $jobs ]]; do
+      db="${queue[0]}"
+      queue=("${queue[@]:1}")
+      log "Starting backup Database: ${db} "
+      tempfile="${SETTINGS[tempdir]}/${db}.cus"
+      sudo -u postgres pg_dump -c -h "$socketdir" -p "$port" -F"${SETTINGS[format]}" -f "$tempfile" "$db" &
+      pid=$!
+      pid_db[$pid]="$db"
+      pid_tmp[$pid]="$tempfile"
+      active=$((active + 1))
+    done
+
+    if [[ $active -gt 0 ]]; then
+      wait -n 2>/dev/null || true
+      for pid in "${!pid_db[@]}"; do
+        if ! kill -0 "$pid" 2>/dev/null; then
+          wait "$pid"; rc=$?
+          db="${pid_db[$pid]}"; tempfile="${pid_tmp[$pid]}"
+          unset 'pid_db[$pid]' 'pid_tmp[$pid]'
+          active=$((active - 1))
+          if [[ $rc -ne 0 ]]; then
+            failed="Error dumping database ${db}"
+          else
+            move_file "$tempfile" "${path}/${db}.cus"
+          fi
+        fi
+      done
+    fi
+  done
+
+  [[ -n "$failed" ]] && fatal "$failed"
 }
 
 delete_old_backups() {
@@ -226,6 +271,7 @@ apply_config() {
   SETTINGS[format]="${CLI_F:-${SETTINGS[format]:-c}}"
   SETTINGS[logdir]="${CLI_L:-${SETTINGS[logdir]:-${SETTINGS[backupdir]}}}"
   SETTINGS[debug_level]="${CLI_d:-${SETTINGS[debug_level]:-1}}"
+  SETTINGS[parallel_jobs]="${CLI_j:-${SETTINGS[parallel_jobs]:-1}}"
 
   if [[ ${#PGDATA_GLOBS[@]} -eq 0 ]]; then
     PGDATA_GLOBS=('/var/lib/pgsql/data' '/var/lib/pgsql/*/data')
@@ -233,7 +279,7 @@ apply_config() {
 }
 
 parse_args() {
-  CLI_i="" CLI_h="" CLI_D="" CLI_T="" CLI_L="" CLI_F="" CLI_d="" CLI_n="" CLI_email=""
+  CLI_i="" CLI_h="" CLI_D="" CLI_T="" CLI_L="" CLI_F="" CLI_d="" CLI_n="" CLI_j="" CLI_email=""
   CLI_help=0 CLI_ini_write=0 CLI_ini_show=0
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -245,6 +291,7 @@ parse_args() {
       -F) CLI_F="${2:-}"; shift 2 ;;
       -d) CLI_d="${2:-}"; shift 2 ;;
       -n) CLI_n="${2:-}"; shift 2 ;;
+      -j) CLI_j="${2:-}"; shift 2 ;;
       --email) CLI_email="${2:-}"; shift 2 ;;
       --help) CLI_help=1; shift ;;
       --ini-write) CLI_ini_write=1; shift ;;
@@ -281,6 +328,7 @@ Folders
 Backup settings
 -F     dump format (c|t|p)
 -n     max number of backup generations to keep
+-j     max concurrent pg_dump processes per cluster (default 1)
 TXT
   exit 0
 }

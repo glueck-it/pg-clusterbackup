@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.6.0
+
+- Added `-j`/`parallel_jobs` (default `1` = unchanged sequential behavior): dumps up to N
+  databases per cluster concurrently in all three implementations (PHP via a `proc_open()`
+  worker pool, Bash via background jobs + `wait -n`, PowerShell via `Start-Process` polling).
+  Clusters themselves are still processed one at a time. Deliberately not `pg_dump`'s own
+  `-j`/`--jobs`, which requires the directory format and would turn each database's backup into
+  a directory of files instead of the single `.cus` file this project's restore story promises.
+  See SPEC.md "Parallel database dumps" for the shared requirements (worker-pool pattern, let
+  already-running jobs finish on the first failure, globals never parallelized).
+- Verified in all three implementations against dummy stand-in processes (not real `pg_dump`):
+  concurrency bound respected, correct pool refill as slots free up, failure detection and
+  propagation, and `-j 1` behaving identically to the previous strictly sequential code.
+
 ## 1.5.0
 
 - Added the PowerShell port (`powershell/pg_clusterbackup.ps1`). Windows has no `pg_lsclusters`
@@ -61,4 +75,4 @@ Initial public release. Rewrite of a long-standing internal script, hardened for
 
 ## Unreleased
 
-- Parallel `pg_dump` (directory format + `--jobs`, and/or concurrent dumps across databases).
+Nothing pending right now.

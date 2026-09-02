@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    pg_clusterbackup 1.5.0 (PowerShell port)
+    pg_clusterbackup 1.6.0 (PowerShell port)
 
 .DESCRIPTION
     Backs up every database of every running PostgreSQL instance on the host into separate
@@ -29,6 +29,7 @@ param(
     [Alias('F')][string]$Format,
     [Alias('dl')][string]$DebugLevel,
     [Alias('n')][string]$MaxKeep,
+    [Alias('j')][string]$Jobs,
     [string]$Email,
     [switch]$Help,
     [switch]$IniWrite,
@@ -37,7 +38,7 @@ param(
 
 Set-StrictMode -Version Latest
 
-$Version = '1.5.0'
+$Version = '1.6.0'
 $Bound   = $PSBoundParameters
 
 $DEBUG_LOG     = 1
@@ -248,24 +249,66 @@ function Backup-Cluster {
     $databases = & $psqlExe -h localhost -p $Instance.Port -U postgres --tuples-only -P format=unaligned -c $sql 2>&1
     if ($LASTEXITCODE -ne 0) { Stop-WithError "Error listing databases for cluster $($Instance.Cluster): $databases" }
 
-    $count = 0
-    foreach ($db in ($databases -split "`r?`n")) {
-        $db = $db.Trim()
-        if ([string]::IsNullOrEmpty($db)) { continue }
-        $count++
-        Write-Log "Starting backup Database: $db "
-        $tempFile = Join-Path $Settings['tempdir'] "$db.cus"
-        $out = & $pgDumpExe -h localhost -p $Instance.Port -c -F $Settings['format'] -f $tempFile $db 2>&1
-        if ($LASTEXITCODE -ne 0) { Stop-WithError "Error dumping database ${db}: $out" }
-        Move-BackupFile $tempFile (Join-Path $path "$db.cus")
+    $dbList = @($databases -split "`r?`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' })
+    if ($dbList.Count -eq 0) {
+        Write-Log 'No databases for backup!'
     }
-    if ($count -eq 0) { Write-Log 'No databases for backup!' }
+    else {
+        Backup-Databases -Databases $dbList -Path $path -PgDumpExe $pgDumpExe -Instance $Instance
+    }
 
     Write-Log 'Starting backup globals' $DEBUG_LOG
     $globalsFile = Join-Path $Settings['tempdir'] 'globals.sql'
     $out = & $pgDumpallExe -h localhost -p $Instance.Port -g -f $globalsFile 2>&1
     if ($LASTEXITCODE -ne 0) { Stop-WithError "Error dumping globals for cluster $($Instance.Cluster): $out" }
     Move-BackupFile $globalsFile (Join-Path $path 'globals.sql')
+}
+
+# Dumps up to `parallel_jobs` databases concurrently (default 1 = unchanged sequential
+# behavior). Not pg_dump's own -j/--jobs: that requires the directory format and would break
+# the single-file-per-database restore story. See SPEC.md "Parallel database dumps". Uses
+# Start-Process (real pg_dump.exe processes) rather than PowerShell background jobs, since
+# there's no scriptblock work here -- just external processes to launch and poll.
+function Backup-Databases {
+    param([string[]]$Databases, [string]$Path, [string]$PgDumpExe, $Instance)
+    $jobs = [int]$Settings['parallel_jobs']
+    if ($jobs -lt 1) { $jobs = 1 }
+
+    $queue = [System.Collections.Generic.Queue[string]]::new([string[]]$Databases)
+    $active = @{}
+    $failed = $null
+
+    while (($queue.Count -gt 0 -and -not $failed) -or $active.Count -gt 0) {
+        while ($queue.Count -gt 0 -and -not $failed -and $active.Count -lt $jobs) {
+            $db = $queue.Dequeue()
+            Write-Log "Starting backup Database: $db "
+            $tempFile = Join-Path $Settings['tempdir'] "$db.cus"
+            $errFile = "$tempFile.err"
+            $psArgs = @('-h', 'localhost', '-p', "$($Instance.Port)", '-c', '-F', $Settings['format'], '-f', $tempFile, $db)
+            $proc = Start-Process -FilePath $PgDumpExe -ArgumentList $psArgs -PassThru -WindowStyle Hidden -RedirectStandardError $errFile
+            $active[$proc.Id] = [PSCustomObject]@{ Process = $proc; Db = $db; TempFile = $tempFile; ErrFile = $errFile }
+        }
+
+        if ($active.Count -gt 0) {
+            Start-Sleep -Milliseconds 150
+            foreach ($procId in @($active.Keys)) {
+                $info = $active[$procId]
+                if ($info.Process.HasExited) {
+                    $active.Remove($procId)
+                    if ($info.Process.ExitCode -ne 0) {
+                        $errText = if (Test-Path -LiteralPath $info.ErrFile) { Get-Content -LiteralPath $info.ErrFile -Raw } else { '' }
+                        $failed = "Error dumping database $($info.Db): $errText"
+                    }
+                    else {
+                        Move-BackupFile $info.TempFile (Join-Path $Path "$($info.Db).cus")
+                    }
+                    Remove-Item -LiteralPath $info.ErrFile -ErrorAction SilentlyContinue
+                }
+            }
+        }
+    }
+
+    if ($failed) { Stop-WithError $failed }
 }
 
 function Remove-OldBackups {
@@ -328,6 +371,7 @@ Folders
 Backup settings
 -F / -Format       dump format (c|t|p)
 -n / -MaxKeep      max number of backup generations to keep
+-j / -Jobs         max concurrent pg_dump processes per cluster (default 1)
 
 Windows notes:
 - There's no sudo-to-postgres equivalent: configure pg_hba.conf (or a password/.pgpass) so this
@@ -352,6 +396,7 @@ $Settings['maxkeep']     = if ($Bound.ContainsKey('MaxKeep'))    { $MaxKeep }   
 $Settings['format']      = if ($Bound.ContainsKey('Format'))     { $Format }     elseif ($Settings['format'])    { $Settings['format'] }    else { 'c' }
 $Settings['logdir']      = if ($Bound.ContainsKey('LogDir'))     { $LogDir }     elseif ($Settings['logdir'])    { $Settings['logdir'] }    else { $Settings['backupdir'] }
 $Settings['debug_level'] = if ($Bound.ContainsKey('DebugLevel')) { $DebugLevel } elseif ($null -ne $Settings['debug_level']) { $Settings['debug_level'] } else { '1' }
+$Settings['parallel_jobs'] = if ($Bound.ContainsKey('Jobs')) { $Jobs } elseif ($Settings['parallel_jobs']) { $Settings['parallel_jobs'] } else { '1' }
 $Settings['smtp_server'] = if ($Settings.Contains('smtp_server')) { $Settings['smtp_server'] } else { '' }
 
 if ($script:PgDataGlobs.Count -eq 0) {

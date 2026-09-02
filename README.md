@@ -46,17 +46,17 @@ Just want the script, no repo clutter? Download the single file, pinned to a rel
 pick PHP, Bash, or PowerShell:
 
 ```sh
-curl -O https://raw.githubusercontent.com/glueck-it/pg-clusterbackup/v1.5.0/php/pg_clusterbackup.php
+curl -O https://raw.githubusercontent.com/glueck-it/pg-clusterbackup/v1.6.0/php/pg_clusterbackup.php
 chmod +x pg_clusterbackup.php
 ```
 
 ```sh
-curl -O https://raw.githubusercontent.com/glueck-it/pg-clusterbackup/v1.5.0/bash/pg_clusterbackup.sh
+curl -O https://raw.githubusercontent.com/glueck-it/pg-clusterbackup/v1.6.0/bash/pg_clusterbackup.sh
 chmod +x pg_clusterbackup.sh
 ```
 
 ```powershell
-Invoke-WebRequest https://raw.githubusercontent.com/glueck-it/pg-clusterbackup/v1.5.0/powershell/pg_clusterbackup.ps1 -OutFile pg_clusterbackup.ps1
+Invoke-WebRequest https://raw.githubusercontent.com/glueck-it/pg-clusterbackup/v1.6.0/powershell/pg_clusterbackup.ps1 -OutFile pg_clusterbackup.ps1
 ```
 
 Or clone the full repo (includes examples, SPEC.md, CHANGELOG.md):
@@ -77,8 +77,8 @@ differences) — examples below use the PHP one, swap in `pg_clusterbackup.sh` o
 # see all options
 ./pg_clusterbackup.php --help
 
-# write your settings to an ini file once
-./pg_clusterbackup.php -D /data/backup/postgresql --email you@example.com -n 14 --ini-write
+# write your settings to an ini file once (-j 4: dump up to 4 databases at once per cluster)
+./pg_clusterbackup.php -D /data/backup/postgresql --email you@example.com -n 14 -j 4 --ini-write
 
 # from then on, just run it (e.g. from cron) — it reads the ini file
 ./pg_clusterbackup.php
@@ -114,6 +114,7 @@ An example ini file is in [examples/pg_clusterbackup.ini.example](examples/pg_cl
 | `-F`  |               | `pg_dump` format: `c` (custom), `t` (tar), `p` (plain) | `c`                          |
 | `-d`  |               | debug level: `0` off, `1` log, `2` terse, `3` verbose | `1`                          |
 | `-n`  |               | number of daily generations to keep                   | `7`                          |
+| `-j`  |               | max concurrent `pg_dump` processes per cluster        | `1`                          |
 |       | `--email`     | mail recipient for the run log                        | none                         |
 |       | `--ini-write` | persist current settings (incl. any flags above) to the ini file | |
 |       | `--ini-show`  | print current effective settings in ini format        |                              |
@@ -148,10 +149,6 @@ pg_restore -h <socketdir> -p <port> -d <database> <backupdir>/<date>/<version>/<
   footgun
 - Temp-to-backup moves work across filesystem/drive boundaries
 - Restrictive `umask` while dumping on Linux, so temp files aren't briefly world-readable
-
-## Roadmap
-
-- [ ] Parallel `pg_dump` (directory format + `--jobs`, and/or concurrent per-database dumps)
 
 ## License
 

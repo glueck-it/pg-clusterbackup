@@ -52,7 +52,7 @@ guarantees, not distro conventions:
    one instance per version, so this does not collide. (A future multi-instance-per-version setup
    on RHEL would need a real name source; out of scope for 1.3.0.)
 
-### 3. Windows service enumeration (PowerShell — planned, not yet implemented)
+### 3. Windows service enumeration (PowerShell)
 
 Windows has no `pg_lsclusters` equivalent either, but this is closer to Debian's model than to
 RHEL's: every PostgreSQL install (EDB installer, Chocolatey, etc.) registers itself as its own
@@ -98,6 +98,7 @@ implementations must connect via `-h localhost -p <port>` instead.
 | `-F`  |               | c/t/p | `c`                              | `pg_dump` format                          |
 | `-d`  |               | 0-3   | `1`                              | debug/log level (0=off,1=log,2=terse,3=verbose) |
 | `-n`  |               | int   | `7`                              | number of daily generations to keep       |
+| `-j`  |               | int   | `1`                              | max concurrent `pg_dump` processes per cluster |
 |       | `--email`     | str   | `monitor@ibou.net`              | mail recipient for the run log            |
 |       | `--help`      | flag  |                                  | print usage and exit                      |
 |       | `--ini-write` | flag  |                                  | persist current settings to the ini file  |
@@ -111,6 +112,33 @@ ini values.
 keeps `-D`/`-BackupDir`, but debug level is `-DebugLevel` (alias `-dl`) instead of `-d`. It also
 uses full names for the long options (`-Help`, `-IniWrite`, `-IniShow`, `-Email`) rather than
 `--double-dash` syntax, since that isn't idiomatic PowerShell. Behavior is otherwise identical.
+
+## Parallel database dumps
+
+`-j`/`parallel_jobs` (default `1`, i.e. today's sequential behavior) bounds how many `pg_dump`
+processes run concurrently **within one cluster's database list** — clusters themselves are
+still processed one at a time, not in parallel, to keep resource usage (and log ordering)
+predictable across clusters.
+
+**Deliberately not `pg_dump -j`/`--jobs`.** That flag only works with the directory format
+(`-Fd`), which would turn each database's backup into a directory of files instead of the single
+`.cus` file this project promises in "Directory layout produced" and in the documented
+`pg_restore` command — a breaking change to the restore story, not a tuning knob. Parallelism
+here instead means: launch up to `-j` separate `pg_dump` processes for different databases at
+the same time, each still producing its own single `-F<format>` file exactly as today.
+
+Requirements common to all implementations:
+
+- A worker-pool pattern: keep up to `-j` `pg_dump` processes running, launching the next queued
+  database as soon as a slot frees up.
+- On the **first** failure among the concurrent jobs: stop launching new ones, let the
+  already-running jobs finish (don't leave orphaned child processes), then fail the whole cluster
+  the same way a sequential failure would (see "Exit / error behavior").
+- A database's temp-to-backup move (and its log line) happens right after *that* job finishes,
+  not batched at the end — so log ordering reflects completion order, not queue order, when
+  `-j > 1`. This is an accepted, documented deviation from strict sequential log ordering.
+- Globals (`pg_dumpall -g`) are never parallelized — always one call, after all database dumps
+  for that cluster have finished.
 
 ## Ini file format
 
@@ -130,7 +158,8 @@ Written with `ini-write`, read on every run if present.
    if another run holds it. Never let two runs write to the same temp files concurrently.
 2. Enumerate clusters; skip (and log) any cluster where `running != 1`.
 3. For each running cluster: list non-template databases (excluding `postgres`), dump each with
-   `pg_dump -c -F<format>` to a temp file, then move it into the final dated path.
+   `pg_dump -c -F<format>` to a temp file, then move it into the final dated path. Up to `-j`
+   databases may be dumped concurrently — see "Parallel database dumps" below.
 4. Dump globals with `pg_dumpall -g`.
 5. Only **after** all clusters/databases were backed up without a fatal error: delete backup-date
    directories beyond the newest `-n` generations.

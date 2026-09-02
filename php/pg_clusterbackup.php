@@ -1,7 +1,7 @@
 #!/usr/bin/php
 <?php
 /**
- * pg_clusterbackup 1.5.0
+ * pg_clusterbackup 1.6.0
  * A class which backups all PostgreSQL clusters with all databases in separate files
  * Don't edit the source, create a ini-file
  *
@@ -13,6 +13,10 @@
  * add to cron with or without any parameters (if you edit the .ini)
  *
  * Changelog:
+ * 1.6.0
+ * - added -j/parallel_jobs: dump up to N databases per cluster concurrently via proc_open()
+ *   worker pool (default 1 = unchanged sequential behavior). See SPEC.md "Parallel database
+ *   dumps" -- deliberately not pg_dump's own -j, which requires the directory format.
  * 1.5.0
  * - no functional changes; version bumped to match the 1.5.0 project release (PowerShell port added)
  * 1.4.0
@@ -35,7 +39,7 @@
  *
  **/
 class pg_clusterbackup {
-  public const VERSION = '1.5.0';
+  public const VERSION = '1.6.0';
 
   public const DEBUG_NONE    = 0;
   public const DEBUG_LOG     = 1;
@@ -73,6 +77,7 @@ class pg_clusterbackup {
     $this->settings['logdir']      = $conf['L']        ?? $this->settings['logdir']      ?? $this->settings['backupdir'];
     $this->settings['debug_level'] = $conf['d']        ?? $this->settings['debug_level'] ?? self::DEBUG_LOG;
     $this->settings['pgdata_globs'] ??= ['/var/lib/pgsql/data', '/var/lib/pgsql/*/data'];
+    $this->settings['parallel_jobs'] = intval($conf['j'] ?? $this->settings['parallel_jobs'] ?? 1);
     $this->help(isset($conf['help']));
   }
   private function load_ini($ini) {
@@ -214,18 +219,60 @@ class pg_clusterbackup {
     $port      = escapeshellarg($cluster['port']);
     $sql="SELECT datname FROM pg_database WHERE NOT datistemplate AND datname <> 'postgres'";
     $databases = $this->exec("sudo -u postgres psql -h {$socketdir} -p {$port} -U postgres --tuples-only -P format=unaligned -c ".escapeshellarg($sql));
-    foreach($databases as $db) {
-      $this->log("Starting backup Database: {$db} ");
-      $db_esc   = escapeshellarg($db);
-      $tempfile = "{$this->settings['tempdir']}/{$db}.cus";
-      $this->exec("sudo -u postgres pg_dump -c -h {$socketdir} -p {$port} -F{$this->settings['format']} -f ".escapeshellarg($tempfile)." {$db_esc}");
-      $this->move_file($tempfile, "{$path}/{$db}.cus");
-    }
     if(count($databases)==0) $this->log('No databases for backup!');
+    $this->backup_databases($databases, $path, $socketdir, $port);
     $this->log('Starting backup globals', self::DEBUG_LOG);
     $globalsfile = "{$this->settings['tempdir']}/globals.sql";
     $this->exec("sudo -u postgres pg_dumpall -g -h {$socketdir} -p {$port} -f ".escapeshellarg($globalsfile));
     $this->move_file($globalsfile, "{$path}/globals.sql");
+  }
+  /**
+   * Dumps up to `parallel_jobs` databases concurrently (default 1 = today's sequential
+   * behavior). Not pg_dump's own -j/--jobs: that requires the directory format and would break
+   * the single-file-per-database restore story. See SPEC.md "Parallel database dumps".
+   */
+  private function backup_databases(array $databases, string $path, string $socketdir, string $port) {
+    $jobs    = max(1, (int)$this->settings['parallel_jobs']);
+    $queue   = $databases;
+    $running = [];
+    $failed  = null;
+
+    while(($queue && !$failed) || $running) {
+      while($queue && !$failed && count($running) < $jobs) {
+        $db = array_shift($queue);
+        $this->log("Starting backup Database: {$db} ");
+        $tempfile = "{$this->settings['tempdir']}/{$db}.cus";
+        $cmd = "sudo -u postgres pg_dump -c -h {$socketdir} -p {$port} -F{$this->settings['format']} -f "
+             . escapeshellarg($tempfile)." ".escapeshellarg($db);
+        $proc = proc_open($cmd, [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
+        if($proc === false) { $failed = "Failed to start pg_dump for {$db}"; break; }
+        stream_set_blocking($pipes[1], false);
+        stream_set_blocking($pipes[2], false);
+        $running[] = ['db' => $db, 'proc' => $proc, 'pipes' => $pipes, 'tempfile' => $tempfile, 'out' => ''];
+      }
+
+      foreach($running as $idx => &$job) {
+        $job['out'] .= stream_get_contents($job['pipes'][1]);
+        $job['out'] .= stream_get_contents($job['pipes'][2]);
+        if(!proc_get_status($job['proc'])['running']) {
+          fclose($job['pipes'][1]);
+          fclose($job['pipes'][2]);
+          $ret = proc_close($job['proc']);
+          if($ret !== 0) {
+            $failed = "Error dumping database {$job['db']}: {$job['out']}";
+          }
+          else {
+            $this->move_file($job['tempfile'], "{$path}/{$job['db']}.cus");
+          }
+          unset($running[$idx]);
+        }
+      }
+      unset($job);
+      $running = array_values($running);
+      if($running) usleep(50000);
+    }
+
+    if($failed) throw new Exception($failed);
   }
   public function backupall() {
     $this->lock();
@@ -271,7 +318,7 @@ class pg_clusterbackup {
     }
   }
   static private function args() {
-    $args = getopt('i::h:D:T:L:F:d:n:', ['help', 'ini-write', 'ini-show', 'email:']);
+    $args = getopt('i::h:D:T:L:F:d:n:j:', ['help', 'ini-write', 'ini-show', 'email:']);
     return $args;
   }
   public function help($is_help) {
@@ -303,6 +350,7 @@ class pg_clusterbackup {
         Backup-Settings
         -F     Dump-Format (c|t|p)
         -n     max number of backup generations to keep
+        -j     max concurrent pg_dump processes per cluster (default 1)
 
         TXT;
       die();
