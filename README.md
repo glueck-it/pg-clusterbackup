@@ -10,7 +10,7 @@ old generations, and mails you the result.
 Available as **PHP** (`php/`), **Bash** (`bash/`), and **PowerShell** (`powershell/`)
 implementations, kept behaviorally identical per [SPEC.md](SPEC.md).
 
-Maintained by [Frank Glück](https://www.dozent.net) — database consultant, developer, and trainer.
+Maintained by [Frank Glück](https://dozent.net) — database consultant, developer, and trainer.
 
 ## Why
 
@@ -150,13 +150,17 @@ pg_restore -h <socketdir> -p <port> -d <database> <backupdir>/<date>/<version>/<
 - Temp-to-backup moves work across filesystem/drive boundaries
 - Restrictive `umask` while dumping on Linux, so temp files aren't briefly world-readable
 
+## Related Tools
+
+- **[PostgreSQL Konfigurator](https://dozent.net/produkte/postgresql-konfigurator)** — A web-based tool to generate optimized, hardware-tailored `postgresql.conf` configurations (memory sizing, connection limits, checkpoint, and WAL tuning).
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
 
 ## About the author
 
-Built and maintained by **Frank Glück** ([Glück IT](https://www.dozent.net)) — a consultant,
+Built and maintained by **Frank Glück** ([Glück IT](https://dozent.net)) — a consultant,
 developer, and trainer working with databases and programming languages. A lot of my current
 project work is migrating databases to PostgreSQL from
 [Oracle](https://dozent.net/seminare/postgresql/migration/migration-von-oracle-zu-postgresql),
@@ -167,7 +171,7 @@ project work is migrating databases to PostgreSQL from
 [MS Access](https://dozent.net/seminare/postgresql/migration/postgresql-migration-von-ms-access),
 plus data analysis work that isn't limited to PostgreSQL.
 
-- Need help with PostgreSQL itself, a migration, or backup strategy? [Get in touch](https://www.dozent.net).
+- Need help with PostgreSQL itself, a migration, or backup strategy? [Get in touch](https://dozent.net).
 - I also run seminars (German) on [PostgreSQL administration](https://dozent.net/seminare/postgresql/postgresql-administration),
   [performance tuning](https://dozent.net/seminare/postgresql/postgresql-performance-tuning),
   [PL/pgSQL](https://dozent.net/seminare/postgresql/plpgsql-programmierung), SQL Server (T-SQL/SSRS/SSAS),

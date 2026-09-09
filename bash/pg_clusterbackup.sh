@@ -307,7 +307,7 @@ pg_clusterbackup ${VERSION}
 ----------------------------------------------------------------------------------------------
 Backup all PostgreSQL Databases from all running Clusters.
 
-Author: Frank Glück (https://www.dozent.net)
+Author: Frank Glück (https://dozent.net)
 Create pg_clusterbackup.ini with settings to override defaults
 You can combine --ini-write with other options to generate an ini file with those values
 

@@ -350,7 +350,7 @@ pg_clusterbackup $Version (PowerShell)
 ----------------------------------------------------------------------------------------------
 Backup all PostgreSQL databases from all running instances.
 
-Author: Frank Glück (https://www.dozent.net)
+Author: Frank Glück (https://dozent.net)
 Create pg_clusterbackup.ini with settings to override defaults
 You can combine -IniWrite with other options to generate an ini file with those values
 
