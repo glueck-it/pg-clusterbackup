@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.7.0
+
+- Added `-C`/`parallel_clusters` (default `1` = unchanged sequential behavior): dumps up to N
+  clusters concurrently across all three implementations (PHP via background child processes,
+  Bash via background jobs + `wait -n`, PowerShell via background child processes). Can be
+  combined with `-j`/`parallel_jobs` for concurrent database dumps within each cluster.
+- Added per-cluster rotation: old backup generations are now pruned immediately after each
+  cluster's backup completes (`delete_cluster`), rather than waiting for the entire host run to
+  finish. Prunes older generations for that specific cluster and cleans up empty date directories.
+- Added per-cluster temp isolation: in-progress dumps and `globals.sql` are written to a dedicated
+  cluster subfolder (`<tempdir>/<version>_<cluster>/`), eliminating file collisions and race conditions
+  when multiple clusters are processed concurrently.
+- Added cluster log prefix: all cluster-specific log entries are tagged with `[<cluster>] `
+  (e.g. `2026-09-14 20:15:00 [main] Starting backup Database: app_db`), ensuring clean readability
+  when logs from concurrent clusters interleave in `pg_backupcluster.log` and the mail summary.
+
 ## 1.6.0
 
 - Added `-j`/`parallel_jobs` (default `1` = unchanged sequential behavior): dumps up to N

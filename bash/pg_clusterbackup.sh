@@ -14,7 +14,7 @@
 # Requires bash 4.3+ (associative arrays, and `wait -n` for parallel dumps).
 set -uo pipefail
 
-VERSION="1.6.0"
+VERSION="1.7.0"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 DEBUG_LOG=1
@@ -31,10 +31,11 @@ LOCK_FD=9
 # ---------- logging / lock / helpers ----------
 
 log() {
-  local txt="$1" level="${2:-0}"
+  local txt="$1" level="${2:-0}" cluster="${3:-}"
   if (( ${SETTINGS[debug_level]:-1} >= level )); then
-    local line
-    line="$(date '+%Y-%m-%d %H:%M:%S') ${txt}"
+    local prefix="" line
+    [[ -n "$cluster" ]] && prefix="[${cluster}] "
+    line="$(date '+%Y-%m-%d %H:%M:%S') ${prefix}${txt}"
     LOG_LINES+=("$line")
     printf '%s\n' "$line" >> "$LOGFILE"
   fi
@@ -151,11 +152,36 @@ scan_instances() {
 
 # ---------- backup ----------
 
+delete_cluster_backups() {
+  local version="$1" cluster="$2"
+  local backups=() d i parent grandparent
+  while IFS= read -r d; do backups+=("$d"); done < <(
+    find "${SETTINGS[backupdir]}" -maxdepth 3 -mindepth 3 -type d -path "*/${version}/${cluster}" | sort -r
+  )
+  for ((i = ${SETTINGS[maxkeep]}; i < ${#backups[@]}; i++)); do
+    log "removing ${backups[$i]}" "$DEBUG_TERSE" "$cluster"
+    rm -rf -- "${backups[$i]}"
+    parent="$(dirname "${backups[$i]}")" # version dir
+    rmdir "$parent" 2>/dev/null || true
+    grandparent="$(dirname "$parent")" # date dir
+    rmdir "$grandparent" 2>/dev/null || true
+  done
+}
+
+delete_empty_dates() {
+  local d
+  while IFS= read -r d; do
+    rmdir "$d" 2>/dev/null || true
+  done < <(find "${SETTINGS[backupdir]}" -maxdepth 1 -mindepth 1 -type d -name '[0-9]*')
+}
+
 backup_cluster() {
   local version="$1" cluster="$2" port="$3" socketdir="$4" date="$5"
   local path="${SETTINGS[backupdir]}/${date}/${version}/${cluster}"
-  log "Starting backup Cluster: ${cluster}"
+  log "Starting backup Cluster: ${cluster}" 0 "$cluster"
   checkdir "$path"
+  local clustertemp="${SETTINGS[tempdir]}/${version}_${cluster}"
+  checkdir "$clustertemp"
 
   local sql="SELECT datname FROM pg_database WHERE NOT datistemplate AND datname <> 'postgres'"
   local databases db
@@ -168,24 +194,26 @@ backup_cluster() {
   done <<< "$databases"
 
   if [[ ${#dbarray[@]} -eq 0 ]]; then
-    log 'No databases for backup!'
+    log 'No databases for backup!' 0 "$cluster"
   else
-    backup_databases "$path" "$socketdir" "$port" "${dbarray[@]}"
+    backup_databases "$path" "$socketdir" "$port" "$cluster" "$clustertemp" "${dbarray[@]}"
   fi
 
-  log "Starting backup globals" "$DEBUG_LOG"
-  local globalsfile="${SETTINGS[tempdir]}/globals.sql"
+  log "Starting backup globals" "$DEBUG_LOG" "$cluster"
+  local globalsfile="${clustertemp}/globals.sql"
   sudo -u postgres pg_dumpall -g -h "$socketdir" -p "$port" -f "$globalsfile" \
     || fatal "Error dumping globals for cluster ${cluster}"
   move_file "$globalsfile" "${path}/globals.sql"
+  delete_cluster_backups "$version" "$cluster"
+  rmdir "$clustertemp" 2>/dev/null || true
 }
 
 # Dumps up to `parallel_jobs` databases concurrently (default 1 = unchanged sequential
 # behavior). Not pg_dump's own -j/--jobs: that requires the directory format and would break
 # the single-file-per-database restore story. See SPEC.md "Parallel database dumps".
 backup_databases() {
-  local path="$1" socketdir="$2" port="$3"
-  shift 3
+  local path="$1" socketdir="$2" port="$3" cluster="$4" clustertemp="$5"
+  shift 5
   local -a queue=("$@")
   local jobs="${SETTINGS[parallel_jobs]:-1}"
   local -A pid_db=() pid_tmp=()
@@ -195,8 +223,8 @@ backup_databases() {
     while [[ ${#queue[@]} -gt 0 && -z "$failed" && $active -lt $jobs ]]; do
       db="${queue[0]}"
       queue=("${queue[@]:1}")
-      log "Starting backup Database: ${db} "
-      tempfile="${SETTINGS[tempdir]}/${db}.cus"
+      log "Starting backup Database: ${db} " 0 "$cluster"
+      tempfile="${clustertemp}/${db}.cus"
       sudo -u postgres pg_dump -c -h "$socketdir" -p "$port" -F"${SETTINGS[format]}" -f "$tempfile" "$db" &
       pid=$!
       pid_db[$pid]="$db"
@@ -225,17 +253,6 @@ backup_databases() {
   [[ -n "$failed" ]] && fatal "$failed"
 }
 
-delete_old_backups() {
-  local backups=() d i
-  while IFS= read -r d; do backups+=("$d"); done < <(
-    find "${SETTINGS[backupdir]}" -maxdepth 1 -mindepth 1 -type d -name '[0-9]*' | sort -r
-  )
-  for ((i = ${SETTINGS[maxkeep]}; i < ${#backups[@]}; i++)); do
-    log "removing ${backups[$i]}" "$DEBUG_TERSE"
-    rm -rf -- "${backups[$i]}"
-  done
-}
-
 backup_all() {
   local date version cluster running_raw port socketdir
   acquire_lock
@@ -243,16 +260,59 @@ backup_all() {
   checkdir "${SETTINGS[backupdir]}/${date}"
   cd "${SETTINGS[tempdir]}" || fatal "Cannot cd into tempdir ${SETTINGS[tempdir]}"
 
+  local -a clusters_to_run=()
   while IFS=$'\t' read -r version cluster running_raw port socketdir; do
     [[ -n "$version" ]] || continue
     if [[ "$running_raw" == "1" || "$running_raw" == "true" ]]; then
-      backup_cluster "$version" "$cluster" "$port" "$socketdir" "$date"
+      clusters_to_run+=("${version}"$'\t'"${cluster}"$'\t'"${port}"$'\t'"${socketdir}")
     else
       log "Cluster: ${cluster} not running!" "$DEBUG_LOG"
     fi
   done < <(detect_clusters)
 
-  delete_old_backups
+  local cjobs="${SETTINGS[parallel_clusters]:-1}"
+  if (( cjobs <= 1 || ${#clusters_to_run[@]} <= 1 )); then
+    local item
+    for item in "${clusters_to_run[@]}"; do
+      IFS=$'\t' read -r version cluster port socketdir <<< "$item"
+      backup_cluster "$version" "$cluster" "$port" "$socketdir" "$date"
+    done
+  else
+    local -a cqueue=("${clusters_to_run[@]}")
+    local -A c_pids=()
+    local cactive=0 cfailed="" cpid crc citem
+
+    while [[ ( ${#cqueue[@]} -gt 0 && -z "$cfailed" ) || $cactive -gt 0 ]]; do
+      while [[ ${#cqueue[@]} -gt 0 && -z "$cfailed" && $cactive -lt $cjobs ]]; do
+        citem="${cqueue[0]}"
+        cqueue=("${cqueue[@]:1}")
+        IFS=$'\t' read -r version cluster port socketdir <<< "$citem"
+        backup_cluster "$version" "$cluster" "$port" "$socketdir" "$date" &
+        cpid=$!
+        c_pids[$cpid]="$cluster"
+        cactive=$((cactive + 1))
+      done
+
+      if [[ $cactive -gt 0 ]]; then
+        wait -n 2>/dev/null || true
+        for cpid in "${!c_pids[@]}"; do
+          if ! kill -0 "$cpid" 2>/dev/null; then
+            wait "$cpid"; crc=$?
+            cluster="${c_pids[$cpid]}"
+            unset 'c_pids[$cpid]'
+            cactive=$((cactive - 1))
+            if [[ $crc -ne 0 ]]; then
+              cfailed="Error backing up cluster ${cluster}"
+            fi
+          fi
+        done
+      fi
+    done
+
+    [[ -n "$cfailed" ]] && fatal "$cfailed"
+  fi
+
+  delete_empty_dates
   release_lock
   send_mail
 }
@@ -272,6 +332,7 @@ apply_config() {
   SETTINGS[logdir]="${CLI_L:-${SETTINGS[logdir]:-${SETTINGS[backupdir]}}}"
   SETTINGS[debug_level]="${CLI_d:-${SETTINGS[debug_level]:-1}}"
   SETTINGS[parallel_jobs]="${CLI_j:-${SETTINGS[parallel_jobs]:-1}}"
+  SETTINGS[parallel_clusters]="${CLI_C:-${SETTINGS[parallel_clusters]:-1}}"
 
   if [[ ${#PGDATA_GLOBS[@]} -eq 0 ]]; then
     PGDATA_GLOBS=('/var/lib/pgsql/data' '/var/lib/pgsql/*/data')
@@ -279,7 +340,7 @@ apply_config() {
 }
 
 parse_args() {
-  CLI_i="" CLI_h="" CLI_D="" CLI_T="" CLI_L="" CLI_F="" CLI_d="" CLI_n="" CLI_j="" CLI_email=""
+  CLI_i="" CLI_h="" CLI_D="" CLI_T="" CLI_L="" CLI_F="" CLI_d="" CLI_n="" CLI_j="" CLI_C="" CLI_email=""
   CLI_help=0 CLI_ini_write=0 CLI_ini_show=0
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -292,6 +353,7 @@ parse_args() {
       -d) CLI_d="${2:-}"; shift 2 ;;
       -n) CLI_n="${2:-}"; shift 2 ;;
       -j) CLI_j="${2:-}"; shift 2 ;;
+      -C) CLI_C="${2:-}"; shift 2 ;;
       --email) CLI_email="${2:-}"; shift 2 ;;
       --help) CLI_help=1; shift ;;
       --ini-write) CLI_ini_write=1; shift ;;
@@ -329,6 +391,7 @@ Backup settings
 -F     dump format (c|t|p)
 -n     max number of backup generations to keep
 -j     max concurrent pg_dump processes per cluster (default 1)
+-C     max concurrent cluster backups (default 1)
 TXT
   exit 0
 }

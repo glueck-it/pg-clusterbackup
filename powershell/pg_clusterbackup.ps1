@@ -30,6 +30,9 @@ param(
     [Alias('dl')][string]$DebugLevel,
     [Alias('n')][string]$MaxKeep,
     [Alias('j')][string]$Jobs,
+    [Alias('C', 'cj')][string]$ParallelClusters,
+    [string]$InternalBackupCluster,
+    [string]$InternalDate,
     [string]$Email,
     [switch]$Help,
     [switch]$IniWrite,
@@ -38,7 +41,7 @@ param(
 
 Set-StrictMode -Version Latest
 
-$Version = '1.6.0'
+$Version = '1.7.0'
 $Bound   = $PSBoundParameters
 
 $DEBUG_LOG     = 1
@@ -83,10 +86,11 @@ function Format-Ini {
 # ---------- logging / lock / helpers ----------
 
 function Write-Log {
-    param([string]$Text, [int]$Level = 0)
+    param([string]$Text, [int]$Level = 0, [string]$Cluster = '')
     $debugLevel = [int]($Settings['debug_level'])
     if ($debugLevel -ge $Level) {
-        $line = "{0} {1}" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $Text
+        $prefix = if (-not [string]::IsNullOrEmpty($Cluster)) { "[$Cluster] " } else { '' }
+        $line = "{0} {1}{2}" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $prefix, $Text
         $script:LogLines.Add($line)
         Add-Content -LiteralPath $script:LogFile -Value $line
     }
@@ -232,36 +236,82 @@ function Get-PgInstances {
 
 # ---------- backup ----------
 
+function Remove-ClusterOldBackups {
+    param([string]$Version, [string]$Cluster)
+    $pattern = "*\$Version\$Cluster"
+    $backups = Get-ChildItem -Path (Join-Path $Settings['backupdir'] "*") -Directory -ErrorAction SilentlyContinue |
+        ForEach-Object {
+            $target = Join-Path $_.FullName (Join-Path $Version $Cluster)
+            if (Test-Path -LiteralPath $target) { Get-Item -LiteralPath $target }
+        } |
+        Sort-Object { $_.Parent.Parent.Name } -Descending
+
+    $toDelete = $backups | Select-Object -Skip ([int]$Settings['maxkeep'])
+    foreach ($dir in $toDelete) {
+        Write-Log "removing $($dir.FullName)" $DEBUG_TERSE $Cluster
+        Remove-Item -LiteralPath $dir.FullName -Recurse -Force
+        $parent = $dir.Parent # version dir
+        if ($parent -and (Get-ChildItem -LiteralPath $parent.FullName -Force).Count -eq 0) {
+            Remove-Item -LiteralPath $parent.FullName -Force -ErrorAction SilentlyContinue
+        }
+        $grandparent = $parent.Parent # date dir
+        if ($grandparent -and (Get-ChildItem -LiteralPath $grandparent.FullName -Force).Count -eq 0) {
+            Remove-Item -LiteralPath $grandparent.FullName -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+function Remove-EmptyDateDirs {
+    $dateDirs = Get-ChildItem -LiteralPath $Settings['backupdir'] -Directory -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -match '^\d+$' }
+    foreach ($d in $dateDirs) {
+        if ((Get-ChildItem -LiteralPath $d.FullName -Force).Count -eq 0) {
+            Remove-Item -LiteralPath $d.FullName -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 function Backup-Cluster {
     param($Instance, [string]$Date)
-    $path = Join-Path $Settings['backupdir'] (Join-Path $Date (Join-Path $Instance.Version $Instance.Cluster))
-    Write-Log "Starting backup Cluster: $($Instance.Cluster)"
+    $cName = $Instance.Cluster
+    $path = Join-Path $Settings['backupdir'] (Join-Path $Date (Join-Path $Instance.Version $cName))
+    Write-Log "Starting backup Cluster: $cName" 0 $cName
     New-BackupDir $path
+    $clusterTemp = Join-Path $Settings['tempdir'] "$($Instance.Version)_$cName"
+    New-BackupDir $clusterTemp
 
-    $psqlExe       = Join-Path $Instance.BinDir 'psql.exe'
-    $pgDumpExe     = Join-Path $Instance.BinDir 'pg_dump.exe'
-    $pgDumpallExe  = Join-Path $Instance.BinDir 'pg_dumpall.exe'
-    if (-not (Test-Path -LiteralPath $psqlExe)) { $psqlExe = 'psql' }
-    if (-not (Test-Path -LiteralPath $pgDumpExe)) { $pgDumpExe = 'pg_dump' }
-    if (-not (Test-Path -LiteralPath $pgDumpallExe)) { $pgDumpallExe = 'pg_dumpall' }
+    try {
+        $psqlExe       = Join-Path $Instance.BinDir 'psql.exe'
+        $pgDumpExe     = Join-Path $Instance.BinDir 'pg_dump.exe'
+        $pgDumpallExe  = Join-Path $Instance.BinDir 'pg_dumpall.exe'
+        if (-not (Test-Path -LiteralPath $psqlExe)) { $psqlExe = 'psql' }
+        if (-not (Test-Path -LiteralPath $pgDumpExe)) { $pgDumpExe = 'pg_dump' }
+        if (-not (Test-Path -LiteralPath $pgDumpallExe)) { $pgDumpallExe = 'pg_dumpall' }
 
-    $sql = "SELECT datname FROM pg_database WHERE NOT datistemplate AND datname <> 'postgres'"
-    $databases = & $psqlExe -h localhost -p $Instance.Port -U postgres --tuples-only -P format=unaligned -c $sql 2>&1
-    if ($LASTEXITCODE -ne 0) { Stop-WithError "Error listing databases for cluster $($Instance.Cluster): $databases" }
+        $sql = "SELECT datname FROM pg_database WHERE NOT datistemplate AND datname <> 'postgres'"
+        $databases = & $psqlExe -h localhost -p $Instance.Port -U postgres --tuples-only -P format=unaligned -c $sql 2>&1
+        if ($LASTEXITCODE -ne 0) { Stop-WithError "Error listing databases for cluster ${cName}: $databases" }
 
-    $dbList = @($databases -split "`r?`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' })
-    if ($dbList.Count -eq 0) {
-        Write-Log 'No databases for backup!'
+        $dbList = @($databases -split "`r?`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' })
+        if ($dbList.Count -eq 0) {
+            Write-Log 'No databases for backup!' 0 $cName
+        }
+        else {
+            Backup-Databases -Databases $dbList -Path $path -PgDumpExe $pgDumpExe -Instance $Instance -ClusterTemp $clusterTemp
+        }
+
+        Write-Log 'Starting backup globals' $DEBUG_LOG $cName
+        $globalsFile = Join-Path $clusterTemp 'globals.sql'
+        $out = & $pgDumpallExe -h localhost -p $Instance.Port -g -f $globalsFile 2>&1
+        if ($LASTEXITCODE -ne 0) { Stop-WithError "Error dumping globals for cluster ${cName}: $out" }
+        Move-BackupFile $globalsFile (Join-Path $path 'globals.sql')
+        Remove-ClusterOldBackups -Version $Instance.Version -Cluster $cName
     }
-    else {
-        Backup-Databases -Databases $dbList -Path $path -PgDumpExe $pgDumpExe -Instance $Instance
+    finally {
+        if (Test-Path -LiteralPath $clusterTemp) {
+            Remove-Item -LiteralPath $clusterTemp -Recurse -Force -ErrorAction SilentlyContinue
+        }
     }
-
-    Write-Log 'Starting backup globals' $DEBUG_LOG
-    $globalsFile = Join-Path $Settings['tempdir'] 'globals.sql'
-    $out = & $pgDumpallExe -h localhost -p $Instance.Port -g -f $globalsFile 2>&1
-    if ($LASTEXITCODE -ne 0) { Stop-WithError "Error dumping globals for cluster $($Instance.Cluster): $out" }
-    Move-BackupFile $globalsFile (Join-Path $path 'globals.sql')
 }
 
 # Dumps up to `parallel_jobs` databases concurrently (default 1 = unchanged sequential
@@ -270,7 +320,8 @@ function Backup-Cluster {
 # Start-Process (real pg_dump.exe processes) rather than PowerShell background jobs, since
 # there's no scriptblock work here -- just external processes to launch and poll.
 function Backup-Databases {
-    param([string[]]$Databases, [string]$Path, [string]$PgDumpExe, $Instance)
+    param([string[]]$Databases, [string]$Path, [string]$PgDumpExe, $Instance, [string]$ClusterTemp)
+    $cName = $Instance.Cluster
     $jobs = [int]$Settings['parallel_jobs']
     if ($jobs -lt 1) { $jobs = 1 }
 
@@ -281,8 +332,8 @@ function Backup-Databases {
     while (($queue.Count -gt 0 -and -not $failed) -or $active.Count -gt 0) {
         while ($queue.Count -gt 0 -and -not $failed -and $active.Count -lt $jobs) {
             $db = $queue.Dequeue()
-            Write-Log "Starting backup Database: $db "
-            $tempFile = Join-Path $Settings['tempdir'] "$db.cus"
+            Write-Log "Starting backup Database: $db " 0 $cName
+            $tempFile = Join-Path $ClusterTemp "$db.cus"
             $errFile = "$tempFile.err"
             $psArgs = @('-h', 'localhost', '-p', "$($Instance.Port)", '-c', '-F', $Settings['format'], '-f', $tempFile, $db)
             $proc = Start-Process -FilePath $PgDumpExe -ArgumentList $psArgs -PassThru -WindowStyle Hidden -RedirectStandardError $errFile
@@ -311,33 +362,68 @@ function Backup-Databases {
     if ($failed) { Stop-WithError $failed }
 }
 
-function Remove-OldBackups {
-    $backups = Get-ChildItem -LiteralPath $Settings['backupdir'] -Directory -ErrorAction SilentlyContinue |
-        Where-Object { $_.Name -match '^\d+$' } |
-        Sort-Object Name -Descending
-    $toDelete = $backups | Select-Object -Skip ([int]$Settings['maxkeep'])
-    foreach ($dir in $toDelete) {
-        Write-Log "removing $($dir.FullName)" $DEBUG_TERSE
-        Remove-Item -LiteralPath $dir.FullName -Recurse -Force
-    }
-}
-
 function Invoke-BackupAll {
     Enter-Lock
     $date = Get-Date -Format 'yyyyMMdd'
     New-BackupDir (Join-Path $Settings['backupdir'] $date)
     Set-Location $Settings['tempdir']
 
+    $clustersToRun = @()
     foreach ($inst in (Get-PgInstances)) {
         if ([int]$inst.Running -eq 1) {
-            Backup-Cluster -Instance $inst -Date $date
+            $clustersToRun += $inst
         }
         else {
             Write-Log "Cluster: $($inst.Cluster) not running!" $DEBUG_LOG
         }
     }
 
-    Remove-OldBackups
+    $cJobs = [int]$Settings['parallel_clusters']
+    if ($cJobs -lt 1) { $cJobs = 1 }
+
+    if ($cJobs -le 1 -or $clustersToRun.Count -le 1) {
+        foreach ($inst in $clustersToRun) {
+            Backup-Cluster -Instance $inst -Date $date
+        }
+    }
+    else {
+        $cQueue = [System.Collections.Generic.Queue[object]]::new([object[]]$clustersToRun)
+        $cActive = @{}
+        $cFailed = $null
+        $psScript = $PSCommandPath
+        if (-not $psScript) { $psScript = $MyInvocation.MyCommand.Path }
+
+        while (($cQueue.Count -gt 0 -and -not $cFailed) -or $cActive.Count -gt 0) {
+            while ($cQueue.Count -gt 0 -and -not $cFailed -and $cActive.Count -lt $cJobs) {
+                $inst = $cQueue.Dequeue()
+                $instJson = $inst | ConvertTo-Json -Compress
+                $errFile = Join-Path $Settings['tempdir'] "cluster_$($inst.Cluster)_$($inst.Version).err"
+                $argsList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $psScript, '-InternalBackupCluster', $instJson, '-InternalDate', $date)
+                if ($IniFile) { $argsList += @('-IniFile', $IniFile) }
+                $proc = Start-Process -FilePath 'powershell.exe' -ArgumentList $argsList -PassThru -WindowStyle Hidden -RedirectStandardError $errFile
+                $cActive[$proc.Id] = [PSCustomObject]@{ Process = $proc; Instance = $inst; ErrFile = $errFile }
+            }
+
+            if ($cActive.Count -gt 0) {
+                Start-Sleep -Milliseconds 200
+                foreach ($procId in @($cActive.Keys)) {
+                    $info = $cActive[$procId]
+                    if ($info.Process.HasExited) {
+                        $cActive.Remove($procId)
+                        if ($info.Process.ExitCode -ne 0) {
+                            $errText = if (Test-Path -LiteralPath $info.ErrFile) { Get-Content -LiteralPath $info.ErrFile -Raw } else { '' }
+                            $cFailed = "Error backing up cluster $($info.Instance.Cluster): $errText"
+                        }
+                        Remove-Item -LiteralPath $info.ErrFile -ErrorAction SilentlyContinue
+                    }
+                }
+            }
+        }
+
+        if ($cFailed) { Stop-WithError $cFailed }
+    }
+
+    Remove-EmptyDateDirs
     Exit-Lock
     Send-BackupMail
 }
@@ -372,6 +458,7 @@ Backup settings
 -F / -Format       dump format (c|t|p)
 -n / -MaxKeep      max number of backup generations to keep
 -j / -Jobs         max concurrent pg_dump processes per cluster (default 1)
+-C / -ParallelClusters (-cj)  max concurrent cluster backups (default 1)
 
 Windows notes:
 - There's no sudo-to-postgres equivalent: configure pg_hba.conf (or a password/.pgpass) so this
@@ -397,6 +484,7 @@ $Settings['format']      = if ($Bound.ContainsKey('Format'))     { $Format }    
 $Settings['logdir']      = if ($Bound.ContainsKey('LogDir'))     { $LogDir }     elseif ($Settings['logdir'])    { $Settings['logdir'] }    else { $Settings['backupdir'] }
 $Settings['debug_level'] = if ($Bound.ContainsKey('DebugLevel')) { $DebugLevel } elseif ($null -ne $Settings['debug_level']) { $Settings['debug_level'] } else { '1' }
 $Settings['parallel_jobs'] = if ($Bound.ContainsKey('Jobs')) { $Jobs } elseif ($Settings['parallel_jobs']) { $Settings['parallel_jobs'] } else { '1' }
+$Settings['parallel_clusters'] = if ($Bound.ContainsKey('ParallelClusters')) { $ParallelClusters } elseif ($Settings['parallel_clusters']) { $Settings['parallel_clusters'] } else { '1' }
 $Settings['smtp_server'] = if ($Settings.Contains('smtp_server')) { $Settings['smtp_server'] } else { '' }
 
 if ($script:PgDataGlobs.Count -eq 0) {
@@ -420,6 +508,13 @@ if ($IniWrite) {
 
 New-BackupDir $Settings['logdir']
 $script:LogFile = Join-Path $Settings['logdir'] 'pg_backupcluster.log'
+
+if ($InternalBackupCluster -and $InternalDate) {
+    $inst = $InternalBackupCluster | ConvertFrom-Json
+    Set-Location $Settings['tempdir']
+    Backup-Cluster -Instance $inst -Date $InternalDate
+    exit 0
+}
 
 try {
     Invoke-BackupAll

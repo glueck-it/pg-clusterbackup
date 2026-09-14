@@ -13,6 +13,11 @@
  * add to cron with or without any parameters (if you edit the .ini)
  *
  * Changelog:
+ * 1.7.0
+ * - added -C/parallel_clusters: dump up to N clusters concurrently (default 1 = unchanged sequential behavior).
+ * - added per-cluster tempdir isolation (<tempdir>/<version>_<cluster>/) to prevent file collisions.
+ * - added per-cluster rotation immediately after each cluster backup completes.
+ * - added cluster prefix [<cluster>] to cluster-specific log lines for clean interleaved logging.
  * 1.6.0
  * - added -j/parallel_jobs: dump up to N databases per cluster concurrently via proc_open()
  *   worker pool (default 1 = unchanged sequential behavior). See SPEC.md "Parallel database
@@ -39,7 +44,7 @@
  *
  **/
 class pg_clusterbackup {
-  public const VERSION = '1.6.0';
+  public const VERSION = '1.7.0';
 
   public const DEBUG_NONE    = 0;
   public const DEBUG_LOG     = 1;
@@ -78,6 +83,7 @@ class pg_clusterbackup {
     $this->settings['debug_level'] = $conf['d']        ?? $this->settings['debug_level'] ?? self::DEBUG_LOG;
     $this->settings['pgdata_globs'] ??= ['/var/lib/pgsql/data', '/var/lib/pgsql/*/data'];
     $this->settings['parallel_jobs'] = intval($conf['j'] ?? $this->settings['parallel_jobs'] ?? 1);
+    $this->settings['parallel_clusters'] = intval($conf['C'] ?? $this->settings['parallel_clusters'] ?? 1);
     $this->help(isset($conf['help']));
   }
   private function load_ini($ini) {
@@ -133,25 +139,50 @@ class pg_clusterbackup {
    * Logs text to logfile and for daily mail
    * @param $txt Text to log
    */
-  public function log(string $txt, $debug_level=0) {
+  /**
+   * Logs text to logfile and for daily mail, optionally prefixed with cluster name
+   * @param $txt Text to log
+   */
+  public function log(string $txt, $debug_level=0, ?string $cluster=null) {
     if($this->debug_level >= $debug_level or $this->debug) {
-      $txt = sprintf('%s %s', date('Y-m-d H:i:s'), $txt);
-      $this->log[] = $txt;
-      file_put_contents($this->logfile, $txt.PHP_EOL , FILE_APPEND | LOCK_EX);
+      $prefix = $cluster !== null ? "[{$cluster}] " : '';
+      $line = sprintf('%s %s%s', date('Y-m-d H:i:s'), $prefix, $txt);
+      $this->log[] = $line;
+      file_put_contents($this->logfile, $line.PHP_EOL , FILE_APPEND | LOCK_EX);
     }
   }
   /**
-   * Deletes overaged backup dirs
+   * Deletes overaged backup dirs for a specific cluster immediately after completion
    */
-  public function delete() {
-    $backups = glob($this->settings['backupdir'].'/[0-9]*',GLOB_ONLYDIR);
-    rsort($backups);
-    $delete = array_slice($backups, $this->settings['maxkeep']);
+  public function delete_cluster(string $version, string $cluster) {
+    $matches = glob("{$this->settings['backupdir']}/[0-9]*/{$version}/{$cluster}", GLOB_ONLYDIR);
+    if(!$matches) return;
+    rsort($matches);
+    $delete = array_slice($matches, $this->settings['maxkeep']);
     foreach($delete as $d) {
-      $this->log("removing {$d}", self::DEBUG_TERSE);
-      $this->exec('rm -rf '.escapeshellarg($d));
+      $this->log("removing {$d}", self::DEBUG_TERSE, $cluster);
+      $this->exec('rm -rf '.escapeshellarg($d), $cluster);
+      $parent = dirname($d); // version dir
+      if(is_dir($parent) && count(scandir($parent)) <= 2) {
+        @rmdir($parent);
+      }
+      $grandparent = dirname($parent); // date dir
+      if(is_dir($grandparent) && count(scandir($grandparent)) <= 2) {
+        @rmdir($grandparent);
+      }
     }
-
+  }
+  /**
+   * Clean up any remaining completely empty date directories
+   */
+  public function delete_empty_dates() {
+    $dateDirs = glob("{$this->settings['backupdir']}/[0-9]*", GLOB_ONLYDIR);
+    if(!$dateDirs) return;
+    foreach($dateDirs as $d) {
+      if(is_dir($d) && count(scandir($d)) <= 2) {
+        @rmdir($d);
+      }
+    }
   }
   public function clusters() {
     if(trim((string)shell_exec('command -v pg_lsclusters 2>/dev/null'))) {
@@ -190,11 +221,11 @@ class pg_clusterbackup {
     }
     return $instances;
   }
-  public function exec(string $cmd) {
+  public function exec(string $cmd, ?string $cluster=null) {
     $out = $ret = null;
     exec($cmd, $out, $ret);
-    $this->log($cmd, $ret ? 0 : self::DEBUG_VERBOSE);
-    $this->log(implode(PHP_EOL, $out), $ret ? self::DEBUG_LOG : self::DEBUG_VERBOSE);
+    $this->log($cmd, $ret ? 0 : self::DEBUG_VERBOSE, $cluster);
+    $this->log(implode(PHP_EOL, $out), $ret ? self::DEBUG_LOG : self::DEBUG_VERBOSE, $cluster);
     if($ret!=0) throw new Exception("Error on executing {$cmd}");
     return $out;
   }
@@ -212,26 +243,38 @@ class pg_clusterbackup {
    * Backup a PG cluster
    */
   public function backup($cluster, $date) {
-    $path = "{$this->settings['backupdir']}/{$date}/{$cluster['version']}/{$cluster['cluster']}";
-    $this->log("Starting backup Cluster: {$cluster['cluster']}");
+    $cName = $cluster['cluster'];
+    $path = "{$this->settings['backupdir']}/{$date}/{$cluster['version']}/{$cName}";
+    $this->log("Starting backup Cluster: {$cName}", 0, $cName);
     $this->checkdir($path);
-    $socketdir = escapeshellarg($cluster['socketdir']);
-    $port      = escapeshellarg($cluster['port']);
-    $sql="SELECT datname FROM pg_database WHERE NOT datistemplate AND datname <> 'postgres'";
-    $databases = $this->exec("sudo -u postgres psql -h {$socketdir} -p {$port} -U postgres --tuples-only -P format=unaligned -c ".escapeshellarg($sql));
-    if(count($databases)==0) $this->log('No databases for backup!');
-    $this->backup_databases($databases, $path, $socketdir, $port);
-    $this->log('Starting backup globals', self::DEBUG_LOG);
-    $globalsfile = "{$this->settings['tempdir']}/globals.sql";
-    $this->exec("sudo -u postgres pg_dumpall -g -h {$socketdir} -p {$port} -f ".escapeshellarg($globalsfile));
-    $this->move_file($globalsfile, "{$path}/globals.sql");
+    $clustertemp = "{$this->settings['tempdir']}/{$cluster['version']}_{$cName}";
+    $this->checkdir($clustertemp);
+
+    try {
+      $socketdir = escapeshellarg($cluster['socketdir']);
+      $port      = escapeshellarg($cluster['port']);
+      $sql="SELECT datname FROM pg_database WHERE NOT datistemplate AND datname <> 'postgres'";
+      $databases = $this->exec("sudo -u postgres psql -h {$socketdir} -p {$port} -U postgres --tuples-only -P format=unaligned -c ".escapeshellarg($sql), $cName);
+      if(count($databases)==0) $this->log('No databases for backup!', 0, $cName);
+      $this->backup_databases($databases, $path, $socketdir, $port, $cName, $clustertemp);
+      $this->log('Starting backup globals', self::DEBUG_LOG, $cName);
+      $globalsfile = "{$clustertemp}/globals.sql";
+      $this->exec("sudo -u postgres pg_dumpall -g -h {$socketdir} -p {$port} -f ".escapeshellarg($globalsfile), $cName);
+      $this->move_file($globalsfile, "{$path}/globals.sql");
+      $this->delete_cluster((string)$cluster['version'], $cName);
+    }
+    finally {
+      if(is_dir($clustertemp)) {
+        @rmdir($clustertemp);
+      }
+    }
   }
   /**
    * Dumps up to `parallel_jobs` databases concurrently (default 1 = today's sequential
    * behavior). Not pg_dump's own -j/--jobs: that requires the directory format and would break
    * the single-file-per-database restore story. See SPEC.md "Parallel database dumps".
    */
-  private function backup_databases(array $databases, string $path, string $socketdir, string $port) {
+  private function backup_databases(array $databases, string $path, string $socketdir, string $port, string $cName, string $clustertemp) {
     $jobs    = max(1, (int)$this->settings['parallel_jobs']);
     $queue   = $databases;
     $running = [];
@@ -240,8 +283,8 @@ class pg_clusterbackup {
     while(($queue && !$failed) || $running) {
       while($queue && !$failed && count($running) < $jobs) {
         $db = array_shift($queue);
-        $this->log("Starting backup Database: {$db} ");
-        $tempfile = "{$this->settings['tempdir']}/{$db}.cus";
+        $this->log("Starting backup Database: {$db} ", 0, $cName);
+        $tempfile = "{$clustertemp}/{$db}.cus";
         $cmd = "sudo -u postgres pg_dump -c -h {$socketdir} -p {$port} -F{$this->settings['format']} -f "
              . escapeshellarg($tempfile)." ".escapeshellarg($db);
         $proc = proc_open($cmd, [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
@@ -279,21 +322,80 @@ class pg_clusterbackup {
     $date = date('Ymd');
     $this->checkdir("{$this->settings['backupdir']}/{$date}");
     chdir($this->settings['tempdir']);
+
+    $clustersToRun = [];
     foreach($this->clusters() as $c) {
       if($c['running']==1) {
-        $this->backup($c, $date);
+        $clustersToRun[] = $c;
       }
       else {
         $this->log("Cluster: {$c['cluster']} not running!", self::DEBUG_LOG);
       }
     }
-    $this->delete();
+
+    $cJobs = max(1, (int)$this->settings['parallel_clusters']);
+    if($cJobs <= 1 || count($clustersToRun) <= 1) {
+      foreach($clustersToRun as $c) {
+        $this->backup($c, $date);
+      }
+    }
+    else {
+      $queue = $clustersToRun;
+      $active = [];
+      $failed = null;
+      $scriptPath = realpath(__FILE__);
+
+      while(($queue && !$failed) || $active) {
+        while($queue && !$failed && count($active) < $cJobs) {
+          $c = array_shift($queue);
+          $clusterJson = escapeshellarg(json_encode($c));
+          $cmd = escapeshellarg(PHP_BINARY) . " " . escapeshellarg($scriptPath) . " --internal-backup-cluster={$clusterJson} --internal-date={$date}";
+          if(!empty($this->ini_file)) {
+            $cmd .= " -i " . escapeshellarg($this->ini_file);
+          }
+          $proc = proc_open($cmd, [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
+          if($proc === false) { $failed = "Failed to launch worker for cluster {$c['cluster']}"; break; }
+          stream_set_blocking($pipes[1], false);
+          stream_set_blocking($pipes[2], false);
+          $active[] = ['cluster' => $c, 'proc' => $proc, 'pipes' => $pipes, 'out' => ''];
+        }
+
+        foreach($active as $idx => &$job) {
+          $job['out'] .= stream_get_contents($job['pipes'][1]);
+          $job['out'] .= stream_get_contents($job['pipes'][2]);
+          if(!proc_get_status($job['proc'])['running']) {
+            fclose($job['pipes'][1]);
+            fclose($job['pipes'][2]);
+            $ret = proc_close($job['proc']);
+            if($ret !== 0) {
+              $failed = "Error backing up cluster {$job['cluster']['cluster']}: {$job['out']}";
+            }
+            unset($active[$idx]);
+          }
+        }
+        unset($job);
+        $active = array_values($active);
+        if($active) usleep(50000);
+      }
+
+      if($failed) throw new Exception($failed);
+    }
+
+    $this->delete_empty_dates();
     $this->unlock();
     $this->mail();
   }
   static public function run() {
     $conf = static::args();
-    if(isset($conf['ini-show'])) {
+    if(isset($conf['internal-backup-cluster']) && isset($conf['internal-date'])) {
+      $c = json_decode($conf['internal-backup-cluster'], true);
+      $date = (string)$conf['internal-date'];
+      $pg = new static($conf);
+      chdir($pg->settings['tempdir']);
+      $pg->backup($c, $date);
+      exit(0);
+    }
+    else if(isset($conf['ini-show'])) {
       echo (new static($conf))->ini_get_settings();
     }
     else if(isset($conf['ini-write'])) {
@@ -318,7 +420,7 @@ class pg_clusterbackup {
     }
   }
   static private function args() {
-    $args = getopt('i::h:D:T:L:F:d:n:j:', ['help', 'ini-write', 'ini-show', 'email:']);
+    $args = getopt('i::h:D:T:L:F:d:n:j:C:', ['help', 'ini-write', 'ini-show', 'email:', 'internal-backup-cluster:', 'internal-date:']);
     return $args;
   }
   public function help($is_help) {
@@ -351,6 +453,7 @@ class pg_clusterbackup {
         -F     Dump-Format (c|t|p)
         -n     max number of backup generations to keep
         -j     max concurrent pg_dump processes per cluster (default 1)
+        -C     max concurrent cluster backups (default 1)
 
         TXT;
       die();

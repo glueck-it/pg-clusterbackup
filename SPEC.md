@@ -99,6 +99,7 @@ implementations must connect via `-h localhost -p <port>` instead.
 | `-d`  |               | 0-3   | `1`                              | debug/log level (0=off,1=log,2=terse,3=verbose) |
 | `-n`  |               | int   | `7`                              | number of daily generations to keep       |
 | `-j`  |               | int   | `1`                              | max concurrent `pg_dump` processes per cluster |
+| `-C`  |               | int   | `1`                              | max concurrent cluster backups                 |
 |       | `--email`     | str   | `monitor@ibou.net`              | mail recipient for the run log            |
 |       | `--help`      | flag  |                                  | print usage and exit                      |
 |       | `--ini-write` | flag  |                                  | persist current settings to the ini file  |
@@ -109,16 +110,17 @@ ini values.
 
 **PowerShell deviation:** PowerShell parameter names/aliases are case-insensitive, so `-D`
 (backup dir) and `-d` (debug level) can't coexist as distinct flags there. The PowerShell port
-keeps `-D`/`-BackupDir`, but debug level is `-DebugLevel` (alias `-dl`) instead of `-d`. It also
-uses full names for the long options (`-Help`, `-IniWrite`, `-IniShow`, `-Email`) rather than
-`--double-dash` syntax, since that isn't idiomatic PowerShell. Behavior is otherwise identical.
+keeps `-D`/`-BackupDir`, but debug level is `-DebugLevel` (alias `-dl`) instead of `-d`. `-C` is
+aliased to `-ParallelClusters` (alias `-cj`). It also uses full names for the long options
+(`-Help`, `-IniWrite`, `-IniShow`, `-Email`) rather than `--double-dash` syntax, since that isn't
+idiomatic PowerShell. Behavior is otherwise identical.
 
-## Parallel database dumps
+## Parallel database dumps and parallel cluster backups
 
-`-j`/`parallel_jobs` (default `1`, i.e. today's sequential behavior) bounds how many `pg_dump`
-processes run concurrently **within one cluster's database list** — clusters themselves are
-still processed one at a time, not in parallel, to keep resource usage (and log ordering)
-predictable across clusters.
+- `-j`/`parallel_jobs` (default `1`, i.e. sequential database behavior) bounds how many `pg_dump`
+  processes run concurrently **within one cluster's database list**.
+- `-C`/`parallel_clusters` (default `1`, i.e. sequential cluster behavior) bounds how many clusters
+  are backed up concurrently.
 
 **Deliberately not `pg_dump -j`/`--jobs`.** That flag only works with the directory format
 (`-Fd`), which would turn each database's backup into a directory of files instead of the single
@@ -129,16 +131,26 @@ the same time, each still producing its own single `-F<format>` file exactly as 
 
 Requirements common to all implementations:
 
-- A worker-pool pattern: keep up to `-j` `pg_dump` processes running, launching the next queued
-  database as soon as a slot frees up.
-- On the **first** failure among the concurrent jobs: stop launching new ones, let the
-  already-running jobs finish (don't leave orphaned child processes), then fail the whole cluster
-  the same way a sequential failure would (see "Exit / error behavior").
+- **Per-cluster temp isolation**: In-progress files (`<database>.cus`, `globals.sql`) are isolated
+  in a dedicated cluster subfolder inside the configured `tempdir` (e.g. `<tempdir>/<version>_<cluster>/`)
+  or with a distinct prefix, so concurrent clusters never overwrite each other's files. The cluster
+  temp directory is cleaned up upon cluster completion.
+- **Cluster log prefix**: When logging events belonging to a specific cluster (listing databases,
+  dumping databases, dumping globals, error messages, rotation), the log line includes the cluster
+  prefix: `[<cluster>] ` (e.g. `2026-09-14 20:15:00 [main] Starting backup Database: app_db`).
+  This ensures that interleaved logs from concurrent clusters can be clearly distinguished and followed.
+- **Worker-pool patterns**:
+  - Up to `-C` clusters run in parallel.
+  - Up to `-j` `pg_dump` processes run in parallel per cluster.
+- On the **first** failure among concurrent jobs: stop launching new ones, let already-running jobs
+  finish (don't leave orphaned child processes), then fail with a fatal error.
 - A database's temp-to-backup move (and its log line) happens right after *that* job finishes,
-  not batched at the end — so log ordering reflects completion order, not queue order, when
-  `-j > 1`. This is an accepted, documented deviation from strict sequential log ordering.
-- Globals (`pg_dumpall -g`) are never parallelized — always one call, after all database dumps
+  not batched at the end.
+- Globals (`pg_dumpall -g`) are never parallelized — always one call per cluster, after all database dumps
   for that cluster have finished.
+- **Per-cluster rotation**: Rotation is performed per cluster immediately after that cluster's backup
+  succeeds. It prunes `<backupdir>/*/<version>/<cluster>` older than the newest `-n` generations for that
+  cluster. Any parent date directories that become completely empty as a result are deleted.
 
 ## Ini file format
 
@@ -157,16 +169,19 @@ Written with `ini-write`, read on every run if present.
 1. Acquire an exclusive lock (e.g. `<tempdir>/pg_clusterbackup.lock`) — abort with a clear error
    if another run holds it. Never let two runs write to the same temp files concurrently.
 2. Enumerate clusters; skip (and log) any cluster where `running != 1`.
-3. For each running cluster: list non-template databases (excluding `postgres`), dump each with
-   `pg_dump -c -F<format>` to a temp file, then move it into the final dated path. Up to `-j`
-   databases may be dumped concurrently — see "Parallel database dumps" below.
-4. Dump globals with `pg_dumpall -g`.
-5. Only **after** all clusters/databases were backed up without a fatal error: delete backup-date
-   directories beyond the newest `-n` generations.
-6. Mail the collected log (🟢 OK on success, 🟥 failed on any fatal error) if an email recipient
+3. For each running cluster (up to `-C` concurrently):
+   a. Create an isolated temp directory for the cluster (`<tempdir>/<version>_<cluster>/`).
+   b. List non-template databases (excluding `postgres`).
+   c. Dump each database with `pg_dump -c -F<format>` to a temp file, then move it into the final dated path. Up to `-j`
+      databases may be dumped concurrently.
+   d. Dump globals with `pg_dumpall -g` to `<tempdir>/<version>_<cluster>/globals.sql` and move to final path.
+   e. Immediately rotate and prune old backup generations for that cluster beyond the newest `-n` generations.
+   f. Clean up the cluster's temp directory.
+4. If all running clusters finished without fatal errors, clean up any now-empty date directories.
+5. Mail the collected log (🟢 OK on success, 🟥 failed on any fatal error) if an email recipient
    is configured and there is anything to report.
-7. All values interpolated into shell commands must be shell-escaped.
-8. A move from temp dir to backup dir must work even when both are on different filesystems
+6. All values interpolated into shell commands must be shell-escaped.
+7. A move from temp dir to backup dir must work even when both are on different filesystems
    (fall back to copy+remove if a direct rename/move fails).
 
 ## Exit / error behavior

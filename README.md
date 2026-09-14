@@ -46,17 +46,17 @@ Just want the script, no repo clutter? Download the single file, pinned to a rel
 pick PHP, Bash, or PowerShell:
 
 ```sh
-curl -O https://raw.githubusercontent.com/glueck-it/pg-clusterbackup/v1.6.0/php/pg_clusterbackup.php
+curl -O https://raw.githubusercontent.com/glueck-it/pg-clusterbackup/v1.7.0/php/pg_clusterbackup.php
 chmod +x pg_clusterbackup.php
 ```
 
 ```sh
-curl -O https://raw.githubusercontent.com/glueck-it/pg-clusterbackup/v1.6.0/bash/pg_clusterbackup.sh
+curl -O https://raw.githubusercontent.com/glueck-it/pg-clusterbackup/v1.7.0/bash/pg_clusterbackup.sh
 chmod +x pg_clusterbackup.sh
 ```
 
 ```powershell
-Invoke-WebRequest https://raw.githubusercontent.com/glueck-it/pg-clusterbackup/v1.6.0/powershell/pg_clusterbackup.ps1 -OutFile pg_clusterbackup.ps1
+Invoke-WebRequest https://raw.githubusercontent.com/glueck-it/pg-clusterbackup/v1.7.0/powershell/pg_clusterbackup.ps1 -OutFile pg_clusterbackup.ps1
 ```
 
 Or clone the full repo (includes examples, SPEC.md, CHANGELOG.md):
@@ -77,8 +77,8 @@ differences) — examples below use the PHP one, swap in `pg_clusterbackup.sh` o
 # see all options
 ./pg_clusterbackup.php --help
 
-# write your settings to an ini file once (-j 4: dump up to 4 databases at once per cluster)
-./pg_clusterbackup.php -D /data/backup/postgresql --email you@example.com -n 14 -j 4 --ini-write
+# write your settings to an ini file once (-j 4: 4 databases concurrently, -C 2: 2 clusters concurrently)
+./pg_clusterbackup.php -D /data/backup/postgresql --email you@example.com -n 14 -j 4 -C 2 --ini-write
 
 # from then on, just run it (e.g. from cron) — it reads the ini file
 ./pg_clusterbackup.php
@@ -93,7 +93,7 @@ Example crontab entry (daily at 02:30):
 PowerShell equivalent (long option names instead of `--double-dash`, see Options below):
 
 ```powershell
-.\pg_clusterbackup.ps1 -D C:\Backup\PostgreSQL -Email you@example.com -MaxKeep 14 -IniWrite
+.\pg_clusterbackup.ps1 -D C:\Backup\PostgreSQL -Email you@example.com -MaxKeep 14 -Jobs 4 -ParallelClusters 2 -IniWrite
 .\pg_clusterbackup.ps1
 ```
 
@@ -115,13 +115,15 @@ An example ini file is in [examples/pg_clusterbackup.ini.example](examples/pg_cl
 | `-d`  |               | debug level: `0` off, `1` log, `2` terse, `3` verbose | `1`                          |
 | `-n`  |               | number of daily generations to keep                   | `7`                          |
 | `-j`  |               | max concurrent `pg_dump` processes per cluster        | `1`                          |
+| `-C`  |               | max concurrent cluster backups                        | `1`                          |
 |       | `--email`     | mail recipient for the run log                        | none                         |
 |       | `--ini-write` | persist current settings (incl. any flags above) to the ini file | |
 |       | `--ini-show`  | print current effective settings in ini format        |                              |
 |       | `--help`      | show usage                                            |                              |
 
 PowerShell uses the same short flags except debug level (`-DebugLevel`/`-dl` instead of `-d`,
-since PowerShell parameter names are case-insensitive and can't tell `-D` and `-d` apart), and
+since PowerShell parameter names are case-insensitive and can't tell `-D` and `-d` apart),
+`-ParallelClusters` (alias `-cj` or `-C`), and
 full names instead of `--double-dash` for the flag-only options (`-Help`, `-IniWrite`,
 `-IniShow`, `-Email`). See [SPEC.md](SPEC.md) for the exact mapping and the full behavior
 contract for all three ports.
