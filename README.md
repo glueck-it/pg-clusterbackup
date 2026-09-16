@@ -156,9 +156,15 @@ pg_restore -h <socketdir> -p <port> -d <database> <backupdir>/<date>/<version>/<
 
 - **[PostgreSQL Konfigurator](https://dozent.net/produkte/postgresql-konfigurator)** — A web-based tool to generate optimized, hardware-tailored `postgresql.conf` configurations (memory sizing, connection limits, checkpoint, and WAL tuning).
 
-## License
+## License & Disclaimer
 
 MIT — see [LICENSE](LICENSE).
+
+> [!WARNING]
+> **Important: Backups & Restore Verification / Disclaimer**  
+> A backup is only a real backup once the restore has been successfully verified. Always perform regular, independent test restores on a separate staging or test system. This software is provided free of charge under the MIT License ("as is"). The author accepts no liability for data loss, incomplete backups, or downtime.  
+> 
+> *Wichtiger Hinweis zu Backups & Restore-Tests: Ein Backup ist erst dann ein Backup, wenn die Rücksicherung erfolgreich getestet wurde. Führen Sie in regelmäßigen Abständen eigenverantwortliche Test-Restores auf einem separaten Staging- oder Testsystem durch. Die Software wird unentgeltlich unter MIT-Lizenz („as is“) bereitgestellt. Der Autor übernimmt keine Haftung für Datenverluste, unvollständige Sicherungen oder Ausfallzeiten.*
 
 ## About the author
 
