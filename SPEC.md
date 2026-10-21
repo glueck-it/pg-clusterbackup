@@ -100,20 +100,31 @@ implementations must connect via `-h localhost -p <port>` instead.
 | `-n`  |               | int   | `7`                              | number of daily generations to keep       |
 | `-j`  |               | int   | `1`                              | max concurrent `pg_dump` processes per cluster |
 | `-C`  |               | int   | `1`                              | max concurrent cluster backups                 |
+| `-Z`  | `--compress`  | str   | `""` (pg_dump default)           | compression level / spec for `pg_dump`         |
+| `-N`  | `--dry-run`   | flag  |                                  | simulate run without dumping or deleting files |
+|       | `--exclude`   | str   | `""`                             | comma-separated globs of database names to skip|
+|       | `--include`   | str   | `""`                             | comma-separated globs of database names to keep|
+|       | `--ping-url`  | str   | `""`                             | healthcheck URL (start/fail/ok pings)          |
 |       | `--email`     | str   | `monitor@ibou.net`              | mail recipient for the run log            |
 |       | `--help`      | flag  |                                  | print usage and exit                      |
 |       | `--ini-write` | flag  |                                  | persist current settings to the ini file  |
 |       | `--ini-show`  | flag  |                                  | print current settings in ini format      |
 
 All non-flag options are also persisted to / read from the ini file; CLI values always win over
-ini values.
+ini values. Additional INI settings without dedicated short flags:
+- `exclude_databases`: comma-separated glob list (e.g. `"test_*,*_tmp"`)
+- `include_databases`: comma-separated glob list (e.g. `"prod_*,analytics"`)
+- `min_free_space_gb`: integer (default `0` = off). If set, checks available disk space on `backupdir` and `tempdir`.
+- `compression`: string forwarded to `pg_dump` (e.g. `"6"` or `"zstd:3"`)
+- `ping_url`: URL for healthchecks/monitoring pings
 
 **PowerShell deviation:** PowerShell parameter names/aliases are case-insensitive, so `-D`
 (backup dir) and `-d` (debug level) can't coexist as distinct flags there. The PowerShell port
 keeps `-D`/`-BackupDir`, but debug level is `-DebugLevel` (alias `-dl`) instead of `-d`. `-C` is
-aliased to `-ParallelClusters` (alias `-cj`). It also uses full names for the long options
-(`-Help`, `-IniWrite`, `-IniShow`, `-Email`) rather than `--double-dash` syntax, since that isn't
-idiomatic PowerShell. Behavior is otherwise identical.
+aliased to `-ParallelClusters` (alias `-cj`), `-Z` is `-Compression`, `-n` is `-MaxKeep` (so `-DryRun` / alias `-WhatIf` replaces `-N`),
+`--exclude` is `-ExcludeDatabases`, `--include` is `-IncludeDatabases`, and `--ping-url` is `-PingUrl`.
+It also uses full names for the long options (`-Help`, `-IniWrite`, `-IniShow`, `-Email`) rather than
+`--double-dash` syntax, since that isn't idiomatic PowerShell. Behavior is otherwise identical.
 
 ## Parallel database dumps and parallel cluster backups
 
@@ -151,6 +162,26 @@ Requirements common to all implementations:
 - **Per-cluster rotation**: Rotation is performed per cluster immediately after that cluster's backup
   succeeds. It prunes `<backupdir>/*/<version>/<cluster>` older than the newest `-n` generations for that
   cluster. Any parent date directories that become completely empty as a result are deleted.
+- **Database filtering (`exclude_databases` / `include_databases`)**:
+  - `postgres` and template databases (`datistemplate = true`) are always excluded.
+  - If `include_databases` is set, only database names matching at least one glob pattern in the comma-separated list are kept.
+  - If `exclude_databases` is set, any database name matching any glob pattern in the comma-separated list is skipped (logged at debug level 1).
+  - Glob matching supports standard wildcards `*` and `?`.
+- **Database size & disk space checks**:
+  - Query database sizes via `SELECT datname, pg_database_size(datname)`.
+  - Log database raw size at start of dump: `[<cluster>] Starting backup Database: <db> (raw size: <formatted>)`.
+  - If `min_free_space_gb` > 0, verify that both `backupdir` and `tempdir` have at least that many gigabytes free before proceeding with dumps. If insufficient, abort with a fatal error.
+- **Dry-run mode (`-N` / `--dry-run`)**:
+  - Simulates the entire process without writing dumps or deleting old backups.
+  - Logs cluster discovery, database listings with sizes, filter decisions, target paths, and rotation targets.
+  - Prepends `[DRY-RUN]` to log/subject lines.
+- **Backup manifest (`manifest.json`)**:
+  - Written into `<backupdir>/<YYYYMMDD>/<version>/<cluster>/manifest.json` after successful backup of each cluster.
+  - Contains JSON metadata: version, date, cluster, pg_version, hostname, start/end timestamps, duration, per-database files and raw/dump sizes, and globals status.
+- **Healthcheck / monitoring webhook (`ping_url`)**:
+  - If configured, sends an HTTP GET/POST to `<ping_url>/start` when the backup run begins.
+  - On overall success, sends an HTTP GET/POST to `<ping_url>`.
+  - On fatal error, sends an HTTP GET/POST to `<ping_url>/fail`. Network errors when calling ping URLs are logged but do not crash the run.
 
 ## Ini file format
 
@@ -162,30 +193,37 @@ Written with `ini-write`, read on every run if present.
 ```
 <backupdir>/<YYYYMMDD>/<pg-version>/<cluster-name>/<database>.cus
 <backupdir>/<YYYYMMDD>/<pg-version>/<cluster-name>/globals.sql
+<backupdir>/<YYYYMMDD>/<pg-version>/<cluster-name>/manifest.json
 ```
 
 ## Run behavior (must match across implementations)
 
 1. Acquire an exclusive lock (e.g. `<tempdir>/pg_clusterbackup.lock`) — abort with a clear error
    if another run holds it. Never let two runs write to the same temp files concurrently.
-2. Enumerate clusters; skip (and log) any cluster where `running != 1`.
-3. For each running cluster (up to `-C` concurrently):
+2. If `ping_url` is configured, send start ping (`<ping_url>/start`).
+3. If `min_free_space_gb` is set, verify free disk space on `backupdir` and `tempdir`.
+4. Enumerate clusters; skip (and log) any cluster where `running != 1`.
+5. For each running cluster (up to `-C` concurrently):
    a. Create an isolated temp directory for the cluster (`<tempdir>/<version>_<cluster>/`).
-   b. List non-template databases (excluding `postgres`).
-   c. Dump each database with `pg_dump -c -F<format>` to a temp file, then move it into the final dated path. Up to `-j`
+   b. List non-template databases (excluding `postgres`) with `pg_database_size`.
+   c. Apply `include_databases` / `exclude_databases` filters.
+   d. In dry-run mode, log actions and skip actual dump/delete operations.
+   e. Dump each database with `pg_dump -c -F<format>` (and compression option if set) to a temp file, then move it into the final dated path. Up to `-j`
       databases may be dumped concurrently.
-   d. Dump globals with `pg_dumpall -g` to `<tempdir>/<version>_<cluster>/globals.sql` and move to final path.
-   e. Immediately rotate and prune old backup generations for that cluster beyond the newest `-n` generations.
-   f. Clean up the cluster's temp directory.
-4. If all running clusters finished without fatal errors, clean up any now-empty date directories.
-5. Mail the collected log (🟢 OK on success, 🟥 failed on any fatal error) if an email recipient
+   f. Dump globals with `pg_dumpall -g` to `<tempdir>/<version>_<cluster>/globals.sql` and move to final path.
+   g. Write `manifest.json` with cluster backup metrics.
+   h. Immediately rotate and prune old backup generations for that cluster beyond the newest `-n` generations.
+   i. Clean up the cluster's temp directory.
+6. If all running clusters finished without fatal errors, clean up any now-empty date directories.
+7. Send success ping to `ping_url` if configured.
+8. Mail the collected log (🟢 OK on success, 🟥 failed on any fatal error, 🟡 DRY-RUN for simulation) if an email recipient
    is configured and there is anything to report.
-6. All values interpolated into shell commands must be shell-escaped.
-7. A move from temp dir to backup dir must work even when both are on different filesystems
-   (fall back to copy+remove if a direct rename/move fails).
+9. All values interpolated into shell commands must be shell-escaped.
+10. A move from temp dir to backup dir must work even when both are on different filesystems
+    (fall back to copy+remove if a direct rename/move fails).
 
 ## Exit / error behavior
 
-- Any fatal error during backup must still result in a failure mail being sent, with the error
+- Any fatal error during backup must still result in a failure mail being sent (and `<ping_url>/fail` pinged), with the error
   message included in the log — even if the error happened during initial setup.
 - `--help`, `--ini-write`, `--ini-show` never trigger a backup run.

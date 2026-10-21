@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.8.0
+
+- Added database include/exclude filters: `exclude_databases` (CLI `--exclude`, PowerShell `-ExcludeDatabases`) and `include_databases` (CLI `--include`, PowerShell `-IncludeDatabases`) supporting comma-separated glob patterns (`test_*,*_tmp`).
+- Added database size querying and disk-space pre-flight check: queries `pg_database_size`, displays formatted raw size on dump start, and validates free disk space on `backupdir` and `tempdir` if `min_free_space_gb` is configured.
+- Added dry-run simulation mode (`-N` / `--dry-run`, PowerShell `-DryRun` / `-WhatIf`): inspects clusters, enumerates databases and sizes, tests include/exclude filters, displays target dump paths and planned rotation without executing dumps or deleting files.
+- Added compression level tuning (`-Z` / `--compress`, PowerShell `-Compression`): passes custom compression level or specification (e.g. `6`, `zstd:3`) directly to `pg_dump`.
+- Added backup manifest (`manifest.json`): writes structured JSON metadata per cluster containing start/end timestamps, duration, pg_version, cluster name, database raw and dump file sizes, and globals dump status.
+- Added healthcheck / monitoring webhook (`ping_url`, CLI `--ping-url`, PowerShell `-PingUrl`): sends start ping (`<ping_url>/start`), success ping (`<ping_url>`), and failure ping (`<ping_url>/fail`) compatible with Healthchecks.io, Uptime Kuma, and Cronitor.
+
 ## 1.7.0
 
 - Added `-C`/`parallel_clusters` (default `1` = unchanged sequential behavior): dumps up to N

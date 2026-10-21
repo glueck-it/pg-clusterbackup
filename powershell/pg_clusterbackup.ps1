@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    pg_clusterbackup 1.6.0 (PowerShell port)
+    pg_clusterbackup 1.8.0 (PowerShell port)
 
 .DESCRIPTION
     Backs up every database of every running PostgreSQL instance on the host into separate
@@ -31,6 +31,11 @@ param(
     [Alias('n')][string]$MaxKeep,
     [Alias('j')][string]$Jobs,
     [Alias('C', 'cj')][string]$ParallelClusters,
+    [Alias('Z')][string]$Compression,
+    [Alias('WhatIf')][switch]$DryRun,
+    [string]$ExcludeDatabases,
+    [string]$IncludeDatabases,
+    [string]$PingUrl,
     [string]$InternalBackupCluster,
     [string]$InternalDate,
     [string]$Email,
@@ -41,7 +46,7 @@ param(
 
 Set-StrictMode -Version Latest
 
-$Version = '1.7.0'
+$Version = '1.8.0'
 $Bound   = $PSBoundParameters
 
 $DEBUG_LOG     = 1
@@ -75,6 +80,7 @@ function Import-Ini {
 function Format-Ini {
     $lines = @()
     foreach ($key in $Settings.Keys) {
+        if ($key -eq 'dry_run') { continue }
         $lines += ('{0,-20} = "{1}"' -f $key, $Settings[$key])
     }
     foreach ($g in $script:PgDataGlobs) {
@@ -89,23 +95,81 @@ function Write-Log {
     param([string]$Text, [int]$Level = 0, [string]$Cluster = '')
     $debugLevel = [int]($Settings['debug_level'])
     if ($debugLevel -ge $Level) {
-        $prefix = if (-not [string]::IsNullOrEmpty($Cluster)) { "[$Cluster] " } else { '' }
+        $prefix = ''
+        if ($Settings['dry_run'] -eq '1') { $prefix = '[DRY-RUN] ' }
+        if (-not [string]::IsNullOrEmpty($Cluster)) { $prefix += "[$Cluster] " }
         $line = "{0} {1}{2}" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $prefix, $Text
         $script:LogLines.Add($line)
-        Add-Content -LiteralPath $script:LogFile -Value $line
+        Write-Output $line
+        if ($Settings['dry_run'] -ne '1' -and $script:LogFile) {
+            Add-Content -LiteralPath $script:LogFile -Value $line
+        }
     }
 }
 
 function New-BackupDir {
     param([string]$Path)
+    if ($Settings['dry_run'] -eq '1') { return }
     if (-not (Test-Path -LiteralPath $Path)) {
         New-Item -ItemType Directory -Path $Path -Force | Out-Null
+    }
+}
+
+function Send-PingWebhook {
+    param([string]$Endpoint = '', [string]$Msg = '')
+    $url = $Settings['ping_url']
+    if ([string]::IsNullOrEmpty($url)) { return }
+    $url = $url.TrimEnd('/')
+    if ($Endpoint) { $url += '/' + $Endpoint.TrimStart('/') }
+
+    try {
+        if ($Msg) {
+            Invoke-RestMethod -Uri $url -Method Post -Body $Msg -ContentType 'text/plain' -TimeoutSec 10 -ErrorAction SilentlyContinue | Out-Null
+        }
+        else {
+            Invoke-RestMethod -Uri $url -Method Get -TimeoutSec 10 -ErrorAction SilentlyContinue | Out-Null
+        }
+    }
+    catch {
+        # ignore network errors for pings
+    }
+}
+
+function Format-Bytes {
+    param([int64]$Bytes)
+    if ($Bytes -lt 1024) { return "$Bytes B" }
+    elseif ($Bytes -lt 1MB) { return "{0:N2} KB" -f ($Bytes / 1KB) }
+    elseif ($Bytes -lt 1GB) { return "{0:N2} MB" -f ($Bytes / 1MB) }
+    else { return "{0:N2} GB" -f ($Bytes / 1GB) }
+}
+
+function Test-DiskSpace {
+    $minGb = 0
+    if ($Settings.Contains('min_free_space_gb') -and -not [string]::IsNullOrEmpty($Settings['min_free_space_gb'])) {
+        $minGb = [int]($Settings['min_free_space_gb'])
+    }
+    if ($minGb -le 0) { return }
+
+    $minBytes = [int64]$minGb * 1024 * 1024 * 1024
+    foreach ($dirKey in @('backupdir', 'tempdir')) {
+        $path = $Settings[$dirKey]
+        $root = [System.IO.Path]::GetPathRoot($path)
+        if ($root) {
+            $drive = Get-PSDrive ($root.TrimEnd(':\')) -ErrorAction SilentlyContinue
+            if ($drive -and $drive.Free) {
+                Write-Log "Checking free disk space on $dirKey ($root): $(Format-Bytes $drive.Free)" $DEBUG_VERBOSE
+                if ($drive.Free -lt $minBytes) {
+                    Stop-WithError "Insufficient disk space on $dirKey ($root): $(Format-Bytes $drive.Free) free, required: $minGb GB"
+                }
+            }
+        }
     }
 }
 
 function Stop-WithError {
     param([string]$Message)
     Write-Log "FATAL: $Message"
+    Send-PingWebhook -Endpoint 'fail' -Msg $Message
     Send-BackupMail '🟥 failed'
     Exit-Lock
     exit 1
@@ -113,6 +177,9 @@ function Stop-WithError {
 
 function Send-BackupMail {
     param([string]$Status = '🟢 OK')
+    if ($Settings['dry_run'] -eq '1') {
+        $Status = '🟡 DRY-RUN'
+    }
     if ([string]::IsNullOrEmpty($Settings['email']) -or $script:LogLines.Count -eq 0) { return }
     if ([string]::IsNullOrEmpty($Settings['smtp_server'])) {
         Write-Log 'Mail not sent: no smtp_server configured (Windows has no local MTA)' $DEBUG_LOG
@@ -131,6 +198,7 @@ function Send-BackupMail {
 }
 
 function Enter-Lock {
+    if ($Settings['dry_run'] -eq '1') { return }
     $lockPath = Join-Path $Settings['tempdir'] 'pg_clusterbackup.lock'
     try {
         $script:LockStream = [System.IO.File]::Open(
@@ -151,6 +219,7 @@ function Exit-Lock {
 
 function Move-BackupFile {
     param([string]$From, [string]$To)
+    if ($Settings['dry_run'] -eq '1') { return }
     try {
         Move-Item -LiteralPath $From -Destination $To -Force -ErrorAction Stop
     }
@@ -160,20 +229,25 @@ function Move-BackupFile {
             Remove-Item -LiteralPath $From -Force -ErrorAction Stop
         }
         catch {
-            Stop-WithError "Failed to move $From to $To"
+            Stop-WithError "Failed to move $From to ${To}: $($_.Exception.Message)"
         }
     }
 }
 
 # ---------- cluster / instance discovery ----------
-# See SPEC.md "Cluster / instance discovery" strategy 3. Primary: enumerate Windows services
-# running pg_ctl.exe (authoritative -- no port scanning, no guessing install paths). Fallback:
-# scan pgdata_globs for portable/non-service installs.
 
 function Get-BinDir {
     param([string]$DataDir)
-    # Standard EDB installer layout: <version>\data and <version>\bin are siblings.
-    Join-Path (Split-Path $DataDir -Parent) 'bin'
+    $parent = Split-Path -Parent $DataDir
+    $candidate = Join-Path $parent 'bin'
+    if (Test-Path -LiteralPath (Join-Path $candidate 'pg_dump.exe')) { return $candidate }
+    $versionFile = Join-Path $DataDir 'PG_VERSION'
+    if (Test-Path -LiteralPath $versionFile) {
+        $ver = (Get-Content -LiteralPath $versionFile -Raw).Trim()
+        $candidate = "C:\Program Files\PostgreSQL\$ver\bin"
+        if (Test-Path -LiteralPath (Join-Path $candidate 'pg_dump.exe')) { return $candidate }
+    }
+    return $null
 }
 
 function Get-PgDataDirDetails {
@@ -187,10 +261,10 @@ function Get-PgDataDirDetails {
     $port = $null
     if ($running) {
         $lines = Get-Content -LiteralPath $pidFile
-        if ($lines.Count -ge 4) { $port = $lines[3] }
+        if ($lines.Length -ge 4) { $port = $lines[3].Trim() }
     }
 
-    [PSCustomObject]@{
+    return [PSCustomObject]@{
         Version   = $version
         Cluster   = $Cluster
         Running   = [int]$running
@@ -238,7 +312,6 @@ function Get-PgInstances {
 
 function Remove-ClusterOldBackups {
     param([string]$Version, [string]$Cluster)
-    $pattern = "*\$Version\$Cluster"
     $backups = Get-ChildItem -Path (Join-Path $Settings['backupdir'] "*") -Directory -ErrorAction SilentlyContinue |
         ForEach-Object {
             $target = Join-Path $_.FullName (Join-Path $Version $Cluster)
@@ -248,20 +321,26 @@ function Remove-ClusterOldBackups {
 
     $toDelete = $backups | Select-Object -Skip ([int]$Settings['maxkeep'])
     foreach ($dir in $toDelete) {
-        Write-Log "removing $($dir.FullName)" $DEBUG_TERSE $Cluster
-        Remove-Item -LiteralPath $dir.FullName -Recurse -Force
-        $parent = $dir.Parent # version dir
-        if ($parent -and (Get-ChildItem -LiteralPath $parent.FullName -Force).Count -eq 0) {
-            Remove-Item -LiteralPath $parent.FullName -Force -ErrorAction SilentlyContinue
+        if ($Settings['dry_run'] -eq '1') {
+            Write-Log "would remove old backup directory $($dir.FullName)" $DEBUG_TERSE $Cluster
         }
-        $grandparent = $parent.Parent # date dir
-        if ($grandparent -and (Get-ChildItem -LiteralPath $grandparent.FullName -Force).Count -eq 0) {
-            Remove-Item -LiteralPath $grandparent.FullName -Force -ErrorAction SilentlyContinue
+        else {
+            Write-Log "removing $($dir.FullName)" $DEBUG_TERSE $Cluster
+            Remove-Item -LiteralPath $dir.FullName -Recurse -Force
+            $parent = $dir.Parent
+            if ($parent -and (Get-ChildItem -LiteralPath $parent.FullName -Force).Count -eq 0) {
+                Remove-Item -LiteralPath $parent.FullName -Force -ErrorAction SilentlyContinue
+            }
+            $grandparent = $parent.Parent
+            if ($grandparent -and (Get-ChildItem -LiteralPath $grandparent.FullName -Force).Count -eq 0) {
+                Remove-Item -LiteralPath $grandparent.FullName -Force -ErrorAction SilentlyContinue
+            }
         }
     }
 }
 
 function Remove-EmptyDateDirs {
+    if ($Settings['dry_run'] -eq '1') { return }
     $dateDirs = Get-ChildItem -LiteralPath $Settings['backupdir'] -Directory -ErrorAction SilentlyContinue |
         Where-Object { $_.Name -match '^\d+$' }
     foreach ($d in $dateDirs) {
@@ -271,14 +350,64 @@ function Remove-EmptyDateDirs {
     }
 }
 
+function Filter-Databases {
+    param([string[]]$DatabasesRaw, [string]$Cluster)
+    $filtered = @()
+    $incList = @()
+    if ($Settings['include_databases']) {
+        $incList = @($Settings['include_databases'] -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    }
+    $excList = @()
+    if ($Settings['exclude_databases']) {
+        $excList = @($Settings['exclude_databases'] -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    }
+
+    foreach ($entry in $DatabasesRaw) {
+        $parts = $entry -split '\|'
+        $db = $parts[0].Trim()
+        $rawSize = if ($parts.Length -gt 1) { [int64]($parts[1].Trim()) } else { 0 }
+        if (-not $db) { continue }
+
+        if ($incList.Count -gt 0) {
+            $matchedInc = $false
+            foreach ($pat in $incList) {
+                if ($db -like $pat) { $matchedInc = $true; break }
+            }
+            if (-not $matchedInc) {
+                Write-Log "Skipping database $db (not matching include_databases)" $DEBUG_VERBOSE $Cluster
+                continue
+            }
+        }
+
+        if ($excList.Count -gt 0) {
+            $matchedExc = $false
+            foreach ($pat in $excList) {
+                if ($db -like $pat) { $matchedExc = $true; break }
+            }
+            if ($matchedExc) {
+                Write-Log "Skipping database $db (matching exclude_databases)" $DEBUG_LOG $Cluster
+                continue
+            }
+        }
+
+        $filtered += [PSCustomObject]@{ Name = $db; RawSize = $rawSize }
+    }
+    return $filtered
+}
+
 function Backup-Cluster {
     param($Instance, [string]$Date)
     $cName = $Instance.Cluster
     $path = Join-Path $Settings['backupdir'] (Join-Path $Date (Join-Path $Instance.Version $cName))
+    $startTime = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+    $startEpoch = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+
     Write-Log "Starting backup Cluster: $cName" 0 $cName
     New-BackupDir $path
     $clusterTemp = Join-Path $Settings['tempdir'] "$($Instance.Version)_$cName"
     New-BackupDir $clusterTemp
+
+    $manifestDatabases = @{}
 
     try {
         $psqlExe       = Join-Path $Instance.BinDir 'psql.exe'
@@ -288,56 +417,121 @@ function Backup-Cluster {
         if (-not (Test-Path -LiteralPath $pgDumpExe)) { $pgDumpExe = 'pg_dump' }
         if (-not (Test-Path -LiteralPath $pgDumpallExe)) { $pgDumpallExe = 'pg_dumpall' }
 
-        $sql = "SELECT datname FROM pg_database WHERE NOT datistemplate AND datname <> 'postgres'"
-        $databases = & $psqlExe -h localhost -p $Instance.Port -U postgres --tuples-only -P format=unaligned -c $sql 2>&1
+        $sql = "SELECT datname || '|' || pg_database_size(datname) FROM pg_database WHERE NOT datistemplate AND datname <> 'postgres'"
+        $databases = & $psqlExe -h localhost -p $Instance.Port -U postgres -w --tuples-only -P format=unaligned -c $sql 2>&1
         if ($LASTEXITCODE -ne 0) { Stop-WithError "Error listing databases for cluster ${cName}: $databases" }
 
-        $dbList = @($databases -split "`r?`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' })
-        if ($dbList.Count -eq 0) {
+        $rawList = @($databases -split "`r?`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' })
+        $filteredList = @(Filter-Databases -DatabasesRaw $rawList -Cluster $cName)
+
+        if ($filteredList.Count -eq 0) {
             Write-Log 'No databases for backup!' 0 $cName
         }
         else {
-            Backup-Databases -Databases $dbList -Path $path -PgDumpExe $pgDumpExe -Instance $Instance -ClusterTemp $clusterTemp
+            $manifestDatabases = Backup-Databases -Databases $filteredList -Path $path -PgDumpExe $pgDumpExe -Instance $Instance -ClusterTemp $clusterTemp
         }
 
         Write-Log 'Starting backup globals' $DEBUG_LOG $cName
         $globalsFile = Join-Path $clusterTemp 'globals.sql'
-        $out = & $pgDumpallExe -h localhost -p $Instance.Port -g -f $globalsFile 2>&1
-        if ($LASTEXITCODE -ne 0) { Stop-WithError "Error dumping globals for cluster ${cName}: $out" }
-        Move-BackupFile $globalsFile (Join-Path $path 'globals.sql')
+        $globalsSize = 0
+
+        if ($Settings['dry_run'] -eq '1') {
+            Write-Log "would dump globals to $(Join-Path $path 'globals.sql')" $DEBUG_LOG $cName
+        }
+        else {
+            $out = & $pgDumpallExe -h localhost -p $Instance.Port -U postgres -w -g -f $globalsFile 2>&1
+            if ($LASTEXITCODE -ne 0) { Stop-WithError "Error dumping globals for cluster ${cName}: $out" }
+            Move-BackupFile $globalsFile (Join-Path $path 'globals.sql')
+            $finalGlobals = Join-Path $path 'globals.sql'
+            if (Test-Path -LiteralPath $finalGlobals) {
+                $globalsSize = (Get-Item -LiteralPath $finalGlobals).Length
+            }
+        }
+
+        $endEpoch = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+        $manifestObj = [ordered]@{
+            version          = $Version
+            cluster          = $cName
+            pg_version       = [string]$Instance.Version
+            date             = $Date
+            hostname         = $Settings['hostname']
+            start_time       = $startTime
+            end_time         = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+            duration_seconds = ($endEpoch - $startEpoch)
+            status           = 'ok'
+            databases        = $manifestDatabases
+            globals          = [ordered]@{
+                file       = 'globals.sql'
+                size_bytes = $globalsSize
+            }
+        }
+
+        if ($Settings['dry_run'] -eq '1') {
+            Write-Log "would write $(Join-Path $path 'manifest.json')" $DEBUG_LOG $cName
+        }
+        else {
+            $manifestJson = $manifestObj | ConvertTo-Json -Depth 5
+            Set-Content -LiteralPath (Join-Path $path 'manifest.json') -Value $manifestJson
+        }
+
         Remove-ClusterOldBackups -Version $Instance.Version -Cluster $cName
     }
     finally {
-        if (Test-Path -LiteralPath $clusterTemp) {
+        if ($Settings['dry_run'] -ne '1' -and (Test-Path -LiteralPath $clusterTemp)) {
             Remove-Item -LiteralPath $clusterTemp -Recurse -Force -ErrorAction SilentlyContinue
         }
     }
 }
 
-# Dumps up to `parallel_jobs` databases concurrently (default 1 = unchanged sequential
-# behavior). Not pg_dump's own -j/--jobs: that requires the directory format and would break
-# the single-file-per-database restore story. See SPEC.md "Parallel database dumps". Uses
-# Start-Process (real pg_dump.exe processes) rather than PowerShell background jobs, since
-# there's no scriptblock work here -- just external processes to launch and poll.
 function Backup-Databases {
-    param([string[]]$Databases, [string]$Path, [string]$PgDumpExe, $Instance, [string]$ClusterTemp)
+    param([object[]]$Databases, [string]$Path, [string]$PgDumpExe, $Instance, [string]$ClusterTemp)
     $cName = $Instance.Cluster
+    $manifestMap = [ordered]@{}
+
+    if ($Settings['dry_run'] -eq '1') {
+        foreach ($item in $Databases) {
+            $db = $item.Name
+            $raw = $item.RawSize
+            Write-Log "would backup Database: $db (raw size: $(Format-Bytes $raw)) to $(Join-Path $Path "$db.cus")" 0 $cName
+            $manifestMap[$db] = [ordered]@{
+                raw_size_bytes    = $raw
+                backup_file       = "$db.cus"
+                backup_size_bytes = 0
+                status            = 'dry-run'
+            }
+        }
+        return $manifestMap
+    }
+
     $jobs = [int]$Settings['parallel_jobs']
     if ($jobs -lt 1) { $jobs = 1 }
 
-    $queue = [System.Collections.Generic.Queue[string]]::new([string[]]$Databases)
+    $queue = [System.Collections.Generic.Queue[object]]::new([object[]]$Databases)
     $active = @{}
     $failed = $null
 
+    $compressArgs = @()
+    if ($Settings['compression']) {
+        $cVal = $Settings['compression']
+        if ($cVal -match '^\d+$') {
+            $compressArgs = @('-Z', $cVal)
+        }
+        else {
+            $compressArgs = @("--compress=$cVal")
+        }
+    }
+
     while (($queue.Count -gt 0 -and -not $failed) -or $active.Count -gt 0) {
         while ($queue.Count -gt 0 -and -not $failed -and $active.Count -lt $jobs) {
-            $db = $queue.Dequeue()
-            Write-Log "Starting backup Database: $db " 0 $cName
+            $item = $queue.Dequeue()
+            $db = $item.Name
+            $raw = $item.RawSize
+            Write-Log "Starting backup Database: $db (raw size: $(Format-Bytes $raw))" 0 $cName
             $tempFile = Join-Path $ClusterTemp "$db.cus"
             $errFile = "$tempFile.err"
-            $psArgs = @('-h', 'localhost', '-p', "$($Instance.Port)", '-c', '-F', $Settings['format'], '-f', $tempFile, $db)
+            $psArgs = @('-h', 'localhost', '-p', "$($Instance.Port)", '-U', 'postgres', '-w') + $compressArgs + @('-c', '-F', $Settings['format'], '-f', $tempFile, $db)
             $proc = Start-Process -FilePath $PgDumpExe -ArgumentList $psArgs -PassThru -WindowStyle Hidden -RedirectStandardError $errFile
-            $active[$proc.Id] = [PSCustomObject]@{ Process = $proc; Db = $db; TempFile = $tempFile; ErrFile = $errFile }
+            $active[$proc.Id] = [PSCustomObject]@{ Process = $proc; Db = $db; RawSize = $raw; TempFile = $tempFile; ErrFile = $errFile }
         }
 
         if ($active.Count -gt 0) {
@@ -351,7 +545,18 @@ function Backup-Databases {
                         $failed = "Error dumping database $($info.Db): $errText"
                     }
                     else {
-                        Move-BackupFile $info.TempFile (Join-Path $Path "$($info.Db).cus")
+                        $finalPath = Join-Path $Path "$($info.Db).cus"
+                        Move-BackupFile $info.TempFile $finalPath
+                        $bakSize = 0
+                        if (Test-Path -LiteralPath $finalPath) {
+                            $bakSize = (Get-Item -LiteralPath $finalPath).Length
+                        }
+                        $manifestMap[$info.Db] = [ordered]@{
+                            raw_size_bytes    = $info.RawSize
+                            backup_file       = "$($info.Db).cus"
+                            backup_size_bytes = $bakSize
+                            status            = 'ok'
+                        }
                     }
                     Remove-Item -LiteralPath $info.ErrFile -ErrorAction SilentlyContinue
                 }
@@ -360,13 +565,27 @@ function Backup-Databases {
     }
 
     if ($failed) { Stop-WithError $failed }
+    return $manifestMap
 }
 
 function Invoke-BackupAll {
+    New-BackupDir $Settings['tempdir']
     Enter-Lock
+    Send-PingWebhook -Endpoint 'start'
+
+    if ($Settings['dry_run'] -eq '1') {
+        Write-Log 'Running in DRY-RUN mode — no actual dumps or deletions will be performed.'
+    }
+
+    Test-DiskSpace
+
     $date = Get-Date -Format 'yyyyMMdd'
     New-BackupDir (Join-Path $Settings['backupdir'] $date)
-    Set-Location $Settings['tempdir']
+    if (Test-Path -LiteralPath $Settings['tempdir']) {
+        if (Test-Path -LiteralPath $Settings['tempdir']) {
+        Set-Location $Settings['tempdir']
+    }
+    }
 
     $clustersToRun = @()
     foreach ($inst in (Get-PgInstances)) {
@@ -381,7 +600,7 @@ function Invoke-BackupAll {
     $cJobs = [int]$Settings['parallel_clusters']
     if ($cJobs -lt 1) { $cJobs = 1 }
 
-    if ($cJobs -le 1 -or $clustersToRun.Count -le 1) {
+    if ($cJobs -le 1 -or $clustersToRun.Count -le 1 -or $Settings['dry_run'] -eq '1') {
         foreach ($inst in $clustersToRun) {
             Backup-Cluster -Instance $inst -Date $date
         }
@@ -425,6 +644,7 @@ function Invoke-BackupAll {
 
     Remove-EmptyDateDirs
     Exit-Lock
+    Send-PingWebhook
     Send-BackupMail
 }
 
@@ -440,25 +660,30 @@ Author: Frank Glück (https://dozent.net)
 Create pg_clusterbackup.ini with settings to override defaults
 You can combine -IniWrite with other options to generate an ini file with those values
 
--Help          shows this page
--IniWrite      write ini file with current settings [$IniFile]
--IniShow       shows ini file with current settings
--Email         recipient for log
+-Help                       shows this page
+-IniWrite                   write ini file with current settings [$IniFile]
+-IniShow                    shows ini file with current settings
+-Email                      recipient for log
+-ExcludeDatabases           comma-separated glob patterns of databases to exclude
+-IncludeDatabases           comma-separated glob patterns of databases to include
+-PingUrl                    healthcheck ping URL (start/fail/ok)
+-Compression (-Z)           compression spec/level for pg_dump (e.g. 6 or zstd:3)
+-DryRun (-WhatIf)           simulate run without dumping or deleting files
 
--i / -IniFile      path and filename for ini file
--h / -Hostname     hostname (default is system hostname)
--DebugLevel (-dl)  debug level 0=off, 1=log (default), 2=terse, 3=verbose
+-i / -IniFile               path and filename for ini file
+-h / -Hostname              hostname (default is system hostname)
+-DebugLevel (-dl)           debug level 0=off, 1=log (default), 2=terse, 3=verbose
 
 Folders
--D / -BackupDir    backup dir
--T / -TempDir      temp dir     [$($Settings['tempdir'])]
--L / -LogDir       log dir      [$($Settings['logdir'])] (default: backup dir)
+-D / -BackupDir             backup dir
+-T / -TempDir               temp dir     [$($Settings['tempdir'])]
+-L / -LogDir                log dir      [$($Settings['logdir'])] (default: backup dir)
 
 Backup settings
--F / -Format       dump format (c|t|p)
--n / -MaxKeep      max number of backup generations to keep
--j / -Jobs         max concurrent pg_dump processes per cluster (default 1)
--C / -ParallelClusters (-cj)  max concurrent cluster backups (default 1)
+-F / -Format                dump format (c|t|p)
+-n / -MaxKeep               max number of backup generations to keep
+-j / -Jobs                  max concurrent pg_dump processes per cluster (default 1)
+-C / -ParallelClusters (-cj) max concurrent cluster backups (default 1)
 
 Windows notes:
 - There's no sudo-to-postgres equivalent: configure pg_hba.conf (or a password/.pgpass) so this
@@ -475,17 +700,23 @@ if (-not $Bound.ContainsKey('IniFile')) {
 }
 Import-Ini -Path $IniFile
 
-$Settings['hostname']    = if ($Bound.ContainsKey('Hostname'))   { $Hostname }   elseif ($Settings['hostname'])  { $Settings['hostname'] }  else { $env:COMPUTERNAME }
-$Settings['backupdir']   = if ($Bound.ContainsKey('BackupDir'))  { $BackupDir }  elseif ($Settings['backupdir']) { $Settings['backupdir'] } else { 'C:\Backup\PostgreSQL' }
-$Settings['tempdir']     = if ($Bound.ContainsKey('TempDir'))    { $TempDir }    elseif ($Settings['tempdir'])   { $Settings['tempdir'] }   else { $env:TEMP }
-$Settings['email']       = if ($Bound.ContainsKey('Email'))      { $Email }      elseif ($Settings['email'])     { $Settings['email'] }     else { 'monitor@ibou.net' }
-$Settings['maxkeep']     = if ($Bound.ContainsKey('MaxKeep'))    { $MaxKeep }    elseif ($Settings['maxkeep'])   { $Settings['maxkeep'] }   else { '7' }
-$Settings['format']      = if ($Bound.ContainsKey('Format'))     { $Format }     elseif ($Settings['format'])    { $Settings['format'] }    else { 'c' }
-$Settings['logdir']      = if ($Bound.ContainsKey('LogDir'))     { $LogDir }     elseif ($Settings['logdir'])    { $Settings['logdir'] }    else { $Settings['backupdir'] }
-$Settings['debug_level'] = if ($Bound.ContainsKey('DebugLevel')) { $DebugLevel } elseif ($null -ne $Settings['debug_level']) { $Settings['debug_level'] } else { '1' }
-$Settings['parallel_jobs'] = if ($Bound.ContainsKey('Jobs')) { $Jobs } elseif ($Settings['parallel_jobs']) { $Settings['parallel_jobs'] } else { '1' }
-$Settings['parallel_clusters'] = if ($Bound.ContainsKey('ParallelClusters')) { $ParallelClusters } elseif ($Settings['parallel_clusters']) { $Settings['parallel_clusters'] } else { '1' }
-$Settings['smtp_server'] = if ($Settings.Contains('smtp_server')) { $Settings['smtp_server'] } else { '' }
+$Settings['hostname']          = if ($Bound.ContainsKey('Hostname'))          { $Hostname }          elseif ($Settings['hostname'])          { $Settings['hostname'] }          else { $env:COMPUTERNAME }
+$Settings['backupdir']         = if ($Bound.ContainsKey('BackupDir'))         { $BackupDir }         elseif ($Settings['backupdir'])         { $Settings['backupdir'] }         else { 'C:\Backup\PostgreSQL' }
+$Settings['tempdir']           = if ($Bound.ContainsKey('TempDir'))           { $TempDir }           elseif ($Settings['tempdir'])           { $Settings['tempdir'] }           else { $env:TEMP }
+$Settings['email']             = if ($Bound.ContainsKey('Email'))             { $Email }             elseif ($Settings['email'])             { $Settings['email'] }             else { 'monitor@ibou.net' }
+$Settings['maxkeep']           = if ($Bound.ContainsKey('MaxKeep'))           { $MaxKeep }           elseif ($Settings['maxkeep'])           { $Settings['maxkeep'] }           else { '7' }
+$Settings['format']            = if ($Bound.ContainsKey('Format'))            { $Format }            elseif ($Settings['format'])            { $Settings['format'] }            else { 'c' }
+$Settings['logdir']            = if ($Bound.ContainsKey('LogDir'))            { $LogDir }            elseif ($Settings['logdir'])            { $Settings['logdir'] }            else { $Settings['backupdir'] }
+$Settings['debug_level']       = if ($Bound.ContainsKey('DebugLevel'))        { $DebugLevel }        elseif ($null -ne $Settings['debug_level']) { $Settings['debug_level'] } else { '1' }
+$Settings['parallel_jobs']     = if ($Bound.ContainsKey('Jobs'))              { $Jobs }              elseif ($Settings['parallel_jobs'])     { $Settings['parallel_jobs'] }     else { '1' }
+$Settings['parallel_clusters'] = if ($Bound.ContainsKey('ParallelClusters'))  { $ParallelClusters }  elseif ($Settings['parallel_clusters']) { $Settings['parallel_clusters'] } else { '1' }
+$Settings['compression']       = if ($Bound.ContainsKey('Compression'))       { $Compression }       elseif ($Settings['compression'])       { $Settings['compression'] }       else { '' }
+$Settings['exclude_databases'] = if ($Bound.ContainsKey('ExcludeDatabases'))  { $ExcludeDatabases }  elseif ($Settings['exclude_databases']) { $Settings['exclude_databases'] } else { '' }
+$Settings['include_databases'] = if ($Bound.ContainsKey('IncludeDatabases'))  { $IncludeDatabases }  elseif ($Settings['include_databases']) { $Settings['include_databases'] } else { '' }
+$Settings['ping_url']          = if ($Bound.ContainsKey('PingUrl'))           { $PingUrl }           elseif ($Settings['ping_url'])          { $Settings['ping_url'] }          else { '' }
+$Settings['min_free_space_gb'] = if ($Settings.Contains('min_free_space_gb')) { $Settings['min_free_space_gb'] } else { '0' }
+$Settings['dry_run']           = if ($DryRun.IsPresent) { '1' } elseif ($Settings.Contains('dry_run')) { $Settings['dry_run'] } else { '0' }
+$Settings['smtp_server']       = if ($Settings.Contains('smtp_server'))       { $Settings['smtp_server'] } else { '' }
 
 if ($script:PgDataGlobs.Count -eq 0) {
     $script:PgDataGlobs = @('C:\Program Files\PostgreSQL\*\data')
@@ -511,7 +742,9 @@ $script:LogFile = Join-Path $Settings['logdir'] 'pg_backupcluster.log'
 
 if ($InternalBackupCluster -and $InternalDate) {
     $inst = $InternalBackupCluster | ConvertFrom-Json
-    Set-Location $Settings['tempdir']
+    if (Test-Path -LiteralPath $Settings['tempdir']) {
+        Set-Location $Settings['tempdir']
+    }
     Backup-Cluster -Instance $inst -Date $InternalDate
     exit 0
 }

@@ -46,17 +46,17 @@ Just want the script, no repo clutter? Download the single file, pinned to a rel
 pick PHP, Bash, or PowerShell:
 
 ```sh
-curl -O https://raw.githubusercontent.com/glueck-it/pg-clusterbackup/v1.7.0/php/pg_clusterbackup.php
+curl -O https://raw.githubusercontent.com/glueck-it/pg-clusterbackup/v1.8.0/php/pg_clusterbackup.php
 chmod +x pg_clusterbackup.php
 ```
 
 ```sh
-curl -O https://raw.githubusercontent.com/glueck-it/pg-clusterbackup/v1.7.0/bash/pg_clusterbackup.sh
+curl -O https://raw.githubusercontent.com/glueck-it/pg-clusterbackup/v1.8.0/bash/pg_clusterbackup.sh
 chmod +x pg_clusterbackup.sh
 ```
 
 ```powershell
-Invoke-WebRequest https://raw.githubusercontent.com/glueck-it/pg-clusterbackup/v1.7.0/powershell/pg_clusterbackup.ps1 -OutFile pg_clusterbackup.ps1
+Invoke-WebRequest https://raw.githubusercontent.com/glueck-it/pg-clusterbackup/v1.8.0/powershell/pg_clusterbackup.ps1 -OutFile pg_clusterbackup.ps1
 ```
 
 Or clone the full repo (includes examples, SPEC.md, CHANGELOG.md):
@@ -116,14 +116,27 @@ An example ini file is in [examples/pg_clusterbackup.ini.example](examples/pg_cl
 | `-n`  |               | number of daily generations to keep                   | `7`                          |
 | `-j`  |               | max concurrent `pg_dump` processes per cluster        | `1`                          |
 | `-C`  |               | max concurrent cluster backups                        | `1`                          |
+| `-Z`  | `--compress`  | compression level / spec for `pg_dump` (e.g. `6`, `zstd:3`) | pg_dump default         |
+| `-N`  | `--dry-run`   | simulate run without dumping or deleting files        | off                          |
+|       | `--exclude`   | comma-separated glob list of databases to skip        | none                         |
+|       | `--include`   | comma-separated glob list of databases to include     | none                         |
+|       | `--ping-url`  | healthcheck URL (sends `/start`, `/fail`, and OK)     | none                         |
 |       | `--email`     | mail recipient for the run log                        | none                         |
 |       | `--ini-write` | persist current settings (incl. any flags above) to the ini file | |
 |       | `--ini-show`  | print current effective settings in ini format        |                              |
 |       | `--help`      | show usage                                            |                              |
 
+Additional ini settings without dedicated short flags:
+- `exclude_databases = "test_*,*_tmp"` (comma-separated globs)
+- `include_databases = "prod_*,analytics"` (comma-separated globs)
+- `min_free_space_gb = "20"` (aborts if free space on `backupdir`/`tempdir` is below threshold)
+- `compression = "6"` or `compression = "zstd:3"`
+- `ping_url = "https://hc-ping.com/..."`
+
 PowerShell uses the same short flags except debug level (`-DebugLevel`/`-dl` instead of `-d`,
 since PowerShell parameter names are case-insensitive and can't tell `-D` and `-d` apart),
-`-ParallelClusters` (alias `-cj` or `-C`), and
+`-ParallelClusters` (alias `-cj` or `-C`), `-Compression` (alias `-Z`), `-DryRun` (alias `-WhatIf`),
+`-ExcludeDatabases`, `-IncludeDatabases`, `-PingUrl`, and
 full names instead of `--double-dash` for the flag-only options (`-Help`, `-IniWrite`,
 `-IniShow`, `-Email`). See [SPEC.md](SPEC.md) for the exact mapping and the full behavior
 contract for all three ports.
@@ -133,6 +146,7 @@ contract for all three ports.
 ```
 <backupdir>/<YYYYMMDD>/<pg-version>/<cluster-name>/<database>.cus
 <backupdir>/<YYYYMMDD>/<pg-version>/<cluster-name>/globals.sql
+<backupdir>/<YYYYMMDD>/<pg-version>/<cluster-name>/manifest.json
 ```
 
 Restore a single database:
