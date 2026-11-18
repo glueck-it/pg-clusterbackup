@@ -16,6 +16,8 @@
  * 1.8.1
  * - fixed per-cluster temp dir (since 1.7.0) being created by root with mode 0700: pg_dump/pg_dumpall run as
  *   postgres could not write into it, every backup aborted with "Permission denied". The dir now belongs to postgres.
+ * - fixed date folder and log times in UTC when php.ini sets no date.timezone: the system time zone is used now
+ *   (TZ, /etc/timezone, /etc/localtime), as in the bash port
  * 1.8.0
  * - added database include/exclude filters (exclude_databases, include_databases, --exclude, --include)
  * - added pg_database_size querying and pre-flight disk space check (min_free_space_gb)
@@ -695,4 +697,35 @@ class pg_clusterbackup {
   }
 }
 
+/**
+ * PHP CLI without date.timezone in php.ini uses UTC, so between midnight and the UTC offset the backups landed
+ * in the previous day's folder. Use the system time zone instead, like the bash port (date '+%Y%m%d').
+ */
+function pg_clusterbackup_system_timezone(): void {
+  // ini_get() reports the built-in default "UTC" when nothing is configured; get_cfg_var() only sees php.ini and -d
+  $configured = get_cfg_var('date.timezone');
+  if (is_string($configured) && $configured !== '') {
+    return;
+  }
+  $candidates = [];
+  $env = getenv('TZ');
+  if (is_string($env) && $env !== '') {
+    $candidates[] = ltrim($env, ':');
+  }
+  if (is_readable('/etc/timezone')) {
+    $candidates[] = trim((string)file_get_contents('/etc/timezone'));
+  }
+  $link = @readlink('/etc/localtime');
+  if (is_string($link) && ($pos = strpos($link, 'zoneinfo/')) !== false) {
+    $candidates[] = substr($link, $pos + strlen('zoneinfo/'));
+  }
+  foreach ($candidates as $tz) {
+    if ($tz !== '' && in_array($tz, timezone_identifiers_list(DateTimeZone::ALL_WITH_BC), true)) {
+      date_default_timezone_set($tz);
+      return;
+    }
+  }
+}
+
+pg_clusterbackup_system_timezone();
 pg_clusterbackup::run();

@@ -6,6 +6,9 @@
   `pg_dump`/`pg_dumpall` running as `postgres` could not write into it and every Linux backup aborted with
   "Permission denied" (e.g. `pg_dumpall: error: could not open output file "/tmp/18_main/globals.sql"`). The
   directory now belongs to `postgres`; the configured `tempdir` only needs to be traversable for `postgres`.
+- Fixed (PHP): without `date.timezone` in `php.ini`, PHP CLI runs in UTC, so between midnight and the UTC offset
+  the backup landed in the previous day's folder and log times were off. The script now uses the system time zone
+  (`TZ`, `/etc/timezone`, `/etc/localtime`), like the bash port. An explicit `date.timezone` still wins.
 - PowerShell: no functional changes; version bumped to match the release.
 
 ## 1.8.0
