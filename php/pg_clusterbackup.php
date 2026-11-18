@@ -1,7 +1,7 @@
 #!/usr/bin/php
 <?php
 /**
- * pg_clusterbackup 1.8.0
+ * pg_clusterbackup 1.8.1
  * A class which backups all PostgreSQL clusters with all databases in separate files
  * Don't edit the source, create a ini-file
  *
@@ -13,6 +13,9 @@
  * add to cron with or without any parameters (if you edit the .ini)
  *
  * Changelog:
+ * 1.8.1
+ * - fixed per-cluster temp dir (since 1.7.0) being created by root with mode 0700: pg_dump/pg_dumpall run as
+ *   postgres could not write into it, every backup aborted with "Permission denied". The dir now belongs to postgres.
  * 1.8.0
  * - added database include/exclude filters (exclude_databases, include_databases, --exclude, --include)
  * - added pg_database_size querying and pre-flight disk space check (min_free_space_gb)
@@ -51,7 +54,7 @@
  *
  **/
 class pg_clusterbackup {
-  public const VERSION = '1.8.0';
+  public const VERSION = '1.8.1';
 
   public const DEBUG_NONE    = 0;
   public const DEBUG_LOG     = 1;
@@ -162,6 +165,20 @@ class pg_clusterbackup {
       if(!$this->settings['dry_run']) {
         mkdir($dir, 0700, true);
       }
+    }
+  }
+
+  /**
+   * The per-cluster temp dir is written by pg_dump/pg_dumpall running as postgres (sudo -u postgres),
+   * so it must belong to postgres (see SPEC.md "Per-cluster temp isolation").
+   */
+  private function make_dump_dir(string $dir, string $cluster) {
+    if($this->settings['dry_run']) return;
+    if(function_exists('posix_geteuid') && posix_geteuid() === 0) {
+      if(!is_dir($dir) && !mkdir($dir, 0700, true)) throw new Exception("Cannot create temp dir {$dir}");
+      $this->exec('chown postgres: '.escapeshellarg($dir), $cluster);
+    } elseif(!is_dir($dir)) {
+      $this->exec('sudo -u postgres mkdir -p -m 0700 '.escapeshellarg($dir), $cluster);
     }
   }
 
@@ -360,7 +377,7 @@ class pg_clusterbackup {
     $this->log("Starting backup Cluster: {$cName}", 0, $cName);
     $this->checkdir($path);
     $clustertemp = "{$this->settings['tempdir']}/{$cluster['version']}_{$cName}";
-    $this->checkdir($clustertemp);
+    $this->make_dump_dir($clustertemp, $cName);
 
     $manifest = [
       'version'          => self::VERSION,
@@ -414,7 +431,9 @@ class pg_clusterbackup {
     }
     finally {
       if(!$this->settings['dry_run'] && is_dir($clustertemp)) {
-        @rmdir($clustertemp);
+        if(!@rmdir($clustertemp)) {
+          @exec('sudo -u postgres rmdir '.escapeshellarg($clustertemp).' 2>/dev/null');
+        }
       }
     }
   }

@@ -46,17 +46,17 @@ Just want the script, no repo clutter? Download the single file, pinned to a rel
 pick PHP, Bash, or PowerShell:
 
 ```sh
-curl -O https://raw.githubusercontent.com/glueck-it/pg-clusterbackup/v1.8.0/php/pg_clusterbackup.php
+curl -O https://raw.githubusercontent.com/glueck-it/pg-clusterbackup/v1.8.1/php/pg_clusterbackup.php
 chmod +x pg_clusterbackup.php
 ```
 
 ```sh
-curl -O https://raw.githubusercontent.com/glueck-it/pg-clusterbackup/v1.8.0/bash/pg_clusterbackup.sh
+curl -O https://raw.githubusercontent.com/glueck-it/pg-clusterbackup/v1.8.1/bash/pg_clusterbackup.sh
 chmod +x pg_clusterbackup.sh
 ```
 
 ```powershell
-Invoke-WebRequest https://raw.githubusercontent.com/glueck-it/pg-clusterbackup/v1.8.0/powershell/pg_clusterbackup.ps1 -OutFile pg_clusterbackup.ps1
+Invoke-WebRequest https://raw.githubusercontent.com/glueck-it/pg-clusterbackup/v1.8.1/powershell/pg_clusterbackup.ps1 -OutFile pg_clusterbackup.ps1
 ```
 
 Or clone the full repo (includes examples, SPEC.md, CHANGELOG.md):

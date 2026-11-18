@@ -145,7 +145,10 @@ Requirements common to all implementations:
 - **Per-cluster temp isolation**: In-progress files (`<database>.cus`, `globals.sql`) are isolated
   in a dedicated cluster subfolder inside the configured `tempdir` (e.g. `<tempdir>/<version>_<cluster>/`)
   or with a distinct prefix, so concurrent clusters never overwrite each other's files. The cluster
-  temp directory is cleaned up upon cluster completion.
+  temp directory is cleaned up upon cluster completion. On Linux the dumps run as `postgres`
+  (`sudo -u postgres`), so the cluster temp directory must belong to `postgres` (mode `0700`): when
+  running as root, create it and `chown` it to `postgres`; otherwise create it as `postgres`. The
+  configured `tempdir` itself only has to be traversable for `postgres` (the default `/tmp` is).
 - **Cluster log prefix**: When logging events belonging to a specific cluster (listing databases,
   dumping databases, dumping globals, error messages, rotation), the log line includes the cluster
   prefix: `[<cluster>] ` (e.g. `2026-09-14 20:15:00 [main] Starting backup Database: app_db`).

@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.8.1
+
+- Fixed (PHP, Bash; since 1.7.0): the per-cluster temp directory was created by root with mode `0700`, so
+  `pg_dump`/`pg_dumpall` running as `postgres` could not write into it and every Linux backup aborted with
+  "Permission denied" (e.g. `pg_dumpall: error: could not open output file "/tmp/18_main/globals.sql"`). The
+  directory now belongs to `postgres`; the configured `tempdir` only needs to be traversable for `postgres`.
+- PowerShell: no functional changes; version bumped to match the release.
+
 ## 1.8.0
 
 - Added database include/exclude filters: `exclude_databases` (CLI `--exclude`, PowerShell `-ExcludeDatabases`) and `include_databases` (CLI `--include`, PowerShell `-IncludeDatabases`) supporting comma-separated glob patterns (`test_*,*_tmp`).

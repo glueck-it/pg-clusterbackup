@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    pg_clusterbackup 1.8.0 (PowerShell port)
+    pg_clusterbackup 1.8.1 (PowerShell port)
 
 .DESCRIPTION
     Backs up every database of every running PostgreSQL instance on the host into separate
@@ -46,7 +46,7 @@ param(
 
 Set-StrictMode -Version Latest
 
-$Version = '1.8.0'
+$Version = '1.8.1'
 $Bound   = $PSBoundParameters
 
 $DEBUG_LOG     = 1

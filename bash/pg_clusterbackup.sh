@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# pg_clusterbackup 1.8.0 (bash port)
+# pg_clusterbackup 1.8.1 (bash port)
 # Backs up every database of every running PostgreSQL cluster/instance on the host into
 # separate files. Don't edit the defaults here — create an ini file instead.
 # Full behavior contract: see SPEC.md.
@@ -14,7 +14,7 @@
 # Requires bash 4.3+ (associative arrays, and `wait -n` for parallel dumps).
 set -uo pipefail
 
-VERSION="1.8.0"
+VERSION="1.8.1"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 DEBUG_LOG=1
@@ -50,6 +50,21 @@ checkdir() {
   local dir="$1"
   if [[ "${SETTINGS[dry_run]:-0}" != "1" ]]; then
     [[ -d "$dir" ]] || mkdir -p -m 0700 "$dir"
+  fi
+}
+
+# The per-cluster temp dir is written by pg_dump/pg_dumpall running as postgres (sudo -u postgres),
+# so it must belong to postgres. Created by root with mode 0700 it was unwritable for them
+# ("Permission denied", every backup aborted) — see SPEC.md "Per-cluster temp isolation".
+make_dump_dir() {
+  local dir="$1"
+  [[ "${SETTINGS[dry_run]:-0}" == "1" ]] && return 0
+  if [[ $EUID -eq 0 ]]; then
+    [[ -d "$dir" ]] || mkdir -p -m 0700 "$dir" || fatal "Cannot create temp dir ${dir}"
+    chown postgres: "$dir" || fatal "Cannot hand temp dir ${dir} over to user postgres"
+  else
+    [[ -d "$dir" ]] || sudo -u postgres mkdir -p -m 0700 "$dir" \
+      || fatal "Cannot create temp dir ${dir} as user postgres (tempdir must be writable for postgres)"
   fi
 }
 
@@ -346,7 +361,7 @@ backup_cluster() {
   log "Starting backup Cluster: ${cluster}" 0 "$cluster"
   checkdir "$path"
   local clustertemp="${SETTINGS[tempdir]}/${version}_${cluster}"
-  checkdir "$clustertemp"
+  make_dump_dir "$clustertemp"
 
   local sql="SELECT datname || '|' || pg_database_size(datname) FROM pg_database WHERE NOT datistemplate AND datname <> 'postgres'"
   local raw_databases db
@@ -388,7 +403,7 @@ backup_cluster() {
 
   delete_cluster_backups "$version" "$cluster"
   if [[ "${SETTINGS[dry_run]:-0}" != "1" ]]; then
-    rmdir "$clustertemp" 2>/dev/null || true
+    rmdir "$clustertemp" 2>/dev/null || sudo -u postgres rmdir "$clustertemp" 2>/dev/null || true
   fi
 }
 
